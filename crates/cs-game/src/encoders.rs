@@ -23,9 +23,6 @@ const BEAM_ENTPOINT: u8 = 1;
 /// `BEAM_ENTS`: a beam between two entities.
 const BEAM_ENTS: u8 = 2;
 
-const ORIGIN: [&str; 3] = ["origin[0]", "origin[1]", "origin[2]"];
-const ANGLES: [&str; 3] = ["angles[0]", "angles[1]", "angles[2]"];
-
 /// Runs the encoder named `encoder`; any other name is not the game's and changes nothing.
 /// `current_player` is `ENGINE_CURRENT_PLAYER()`: the slot of the client the packet is for.
 pub fn delta_encode(
@@ -43,36 +40,20 @@ pub fn delta_encode(
     }
 }
 
-/// `DELTA_UNSETBYINDEX` of each field of `names` the description has.
-fn unset(marks: &mut DeltaMarks<'_>, names: &[&str]) {
-    for name in names {
-        if let Some(index) = marks.find_field(name) {
-            marks.unset(index);
-        }
-    }
-}
-
-/// `DELTA_SETBYINDEX` of each field of `names` the description has.
-fn set(marks: &mut DeltaMarks<'_>, names: &[&str]) {
-    for name in names {
-        if let Some(index) = marks.find_field(name) {
-            marks.set(index);
-        }
-    }
-}
-
 /// `localplayer = (t->number - 1) == ENGINE_CURRENT_PLAYER()`.
+#[inline]
 fn is_local_player(current_player: u8, to: &GoldSrcEntityState) -> bool {
     i32::from(to.number) - 1 == i32::from(current_player)
 }
 
 /// The tail `Entity_Encode` and `Player_Encode` share: an entity that follows another has no
 /// origin of its own on the wire; one that began or stopped following has it sent again.
+#[inline]
 fn follow_origin(from: &GoldSrcEntityState, to: &GoldSrcEntityState, marks: &mut DeltaMarks<'_>) {
     if to.movetype == MOVETYPE_FOLLOW && to.aiment != 0 {
-        unset(marks, &ORIGIN);
+        marks.unset_mask(marks.entity_origin_mask());
     } else if to.aiment != from.aiment {
-        set(marks, &ORIGIN);
+        marks.set_mask(marks.entity_origin_mask());
     }
 }
 
@@ -90,11 +71,10 @@ pub fn entity_encode(
     marks: &mut DeltaMarks<'_>,
 ) {
     if is_local_player(current_player, to) {
-        unset(marks, &ORIGIN);
+        marks.unset_mask(marks.entity_origin_mask());
     }
     if to.impacttime != 0.0 && to.starttime != 0.0 {
-        unset(marks, &ORIGIN);
-        unset(marks, &ANGLES);
+        marks.unset_mask(marks.entity_origin_mask() | marks.entity_angles_mask());
     }
     follow_origin(from, to, marks);
 }
@@ -108,7 +88,7 @@ pub fn player_encode(
     marks: &mut DeltaMarks<'_>,
 ) {
     if is_local_player(current_player, to) {
-        unset(marks, &ORIGIN);
+        marks.unset_mask(marks.entity_origin_mask());
     }
     follow_origin(from, to, marks);
 }
@@ -128,15 +108,15 @@ pub fn custom_encode(
     let beam_type = to.rendermode & 0x0F;
     if beam_type != BEAM_POINTS {
         if beam_type != BEAM_ENTPOINT {
-            unset(marks, &ORIGIN);
+            marks.unset_mask(marks.entity_origin_mask());
         }
-        unset(marks, &ANGLES);
+        marks.unset_mask(marks.entity_angles_mask());
     }
     if beam_type != BEAM_ENTS && beam_type != BEAM_ENTPOINT {
-        unset(marks, &["skin", "sequence"]);
+        marks.unset_mask(marks.entity_skin_sequence_mask());
     }
     if from.animtime as i32 == to.animtime as i32 {
-        unset(marks, &["animtime"]);
+        marks.unset_mask(marks.entity_animtime_mask());
     }
 }
 

@@ -10,6 +10,7 @@
 //!   `custom_entity_state_t`, `usercmd_t`, `weapon_data_t`, and `event_t`.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use glam::Vec3;
 
@@ -61,12 +62,14 @@ pub struct DeltaSchema {
     /// Name -> index of the first field of that name, built on the first lookup. It is a cache
     /// of `fields` (equality and `Clone` ignore it), so `fields` must not change after a lookup.
     index: FieldIndexCache,
+    /// Lazily compiled per-slot field accessor plans for direct struct-to-bitstream codecs.
+    plans: CompiledPlanCache,
 }
 
 /// The lazily built name -> field index map of a [`DeltaSchema`]: a lookup was a linear scan of
 /// string compares, run about 55 times per entity state decoded.
 #[derive(Debug, Default)]
-struct FieldIndexCache(std::sync::OnceLock<std::collections::HashMap<String, usize>>);
+struct FieldIndexCache(OnceLock<HashMap<String, usize>>);
 
 impl Clone for FieldIndexCache {
     fn clone(&self) -> Self {
@@ -80,22 +83,228 @@ impl PartialEq for FieldIndexCache {
     }
 }
 
+/// Precompiled per-slot metadata for one schema field inside a [`CompiledPlan`].
+#[derive(Debug, Clone, Copy)]
+struct CompiledSlot<F: Copy> {
+    field_id: F,
+    base_type: u32,
+    signed: bool,
+    bits: u32,
+    pre: f64,
+    post: f64,
+    pre_is_unit: bool,
+    post_is_unit: bool,
+}
+
+/// Precompiled slot-to-field accessor plan for a [`DeltaSchema`] paired with struct type `T`.
+///
+/// Built at most once per [`DeltaSchema`] via [`OnceLock`], mapping schema slot `0..len`
+/// (`<= 64`) directly to a compact `#[repr(u8)] Copy` field identifier so struct-to-bitstream
+/// delta encoding and decoding perform zero `HashMap` lookups and zero heap allocations.
+#[derive(Debug, Clone)]
+pub struct CompiledPlan<F: Copy> {
+    slots: [CompiledSlot<F>; 64],
+    len: usize,
+    valid_mask: u64,
+    origin_mask: u64,
+    angles_mask: u64,
+    skin_seq_mask: u64,
+    animtime_mask: u64,
+}
+
+impl<F: Copy + Eq> CompiledPlan<F> {
+    fn compile(
+        fields: &[DeltaFieldDesc],
+        unknown: F,
+        map_name: impl Fn(&str) -> F,
+        tag_masks: impl Fn(F, u64, &mut u64, &mut u64, &mut u64, &mut u64),
+    ) -> Self {
+        let dummy = CompiledSlot {
+            field_id: unknown,
+            base_type: 0,
+            signed: false,
+            bits: 0,
+            pre: 1.0,
+            post: 1.0,
+            pre_is_unit: true,
+            post_is_unit: true,
+        };
+        let mut slots = [dummy; 64];
+        let len = fields.len().min(64);
+        let valid_mask = if len >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << len) - 1
+        };
+        let mut origin_mask = 0u64;
+        let mut angles_mask = 0u64;
+        let mut skin_seq_mask = 0u64;
+        let mut animtime_mask = 0u64;
+
+        for (i, field) in fields.iter().enumerate().take(len) {
+            // Preserve `DeltaSchema::field_index` first-occurrence semantics on duplicate names.
+            let is_dup = fields[..i].iter().any(|prev| prev.name == field.name);
+            let field_id = if is_dup {
+                unknown
+            } else {
+                map_name(&field.name)
+            };
+            let pre = field.premultiply as f64;
+            let post = field.postmultiply as f64;
+            slots[i] = CompiledSlot {
+                field_id,
+                base_type: field.base_type(),
+                signed: field.is_signed(),
+                bits: field.significant_bits as u32,
+                pre,
+                post,
+                pre_is_unit: (0.9999..=1.0001).contains(&pre),
+                post_is_unit: (0.9999..=1.0001).contains(&post),
+            };
+            if field_id != unknown {
+                tag_masks(
+                    field_id,
+                    1u64 << i,
+                    &mut origin_mask,
+                    &mut angles_mask,
+                    &mut skin_seq_mask,
+                    &mut animtime_mask,
+                );
+            }
+        }
+
+        Self {
+            slots,
+            len,
+            valid_mask,
+            origin_mask,
+            angles_mask,
+            skin_seq_mask,
+            animtime_mask,
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    pub fn valid_mask(&self) -> u64 {
+        self.valid_mask
+    }
+}
+
+#[derive(Debug, Default)]
+struct CompiledPlanCache {
+    entity: OnceLock<Box<CompiledPlan<EntityFieldId>>>,
+    clientdata: OnceLock<Box<CompiledPlan<ClientDataFieldId>>>,
+    weapondata: OnceLock<Box<CompiledPlan<WeaponDataFieldId>>>,
+    usercmd: OnceLock<Box<CompiledPlan<UserCmdFieldId>>>,
+}
+
+impl Clone for CompiledPlanCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for CompiledPlanCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 impl DeltaSchema {
     /// A schema of `fields`.
     pub fn new(name: String, encoder: Option<String>, fields: Vec<DeltaFieldDesc>) -> Self {
-        Self { name, encoder, fields, index: FieldIndexCache::default() }
+        Self {
+            name,
+            encoder,
+            fields,
+            index: FieldIndexCache::default(),
+            plans: CompiledPlanCache::default(),
+        }
     }
 
     /// The index of the first field called `name`.
     pub fn field_index(&self, name: &str) -> Option<usize> {
         let map = self.index.0.get_or_init(|| {
-            let mut map = std::collections::HashMap::with_capacity(self.fields.len());
+            let mut map = HashMap::with_capacity(self.fields.len());
             for (i, f) in self.fields.iter().enumerate() {
                 map.entry(f.name.clone()).or_insert(i);
             }
             map
         });
         map.get(name).copied()
+    }
+
+    /// Precompiled field accessor plan for [`GoldSrcEntityState`] (`entity_state_t`,
+    /// `entity_state_player_t`, `custom_entity_state_t`).
+    pub fn entity_plan(&self) -> &CompiledPlan<EntityFieldId> {
+        self.plans.entity.get_or_init(|| {
+            Box::new(CompiledPlan::compile(
+                &self.fields,
+                EntityFieldId::Unknown,
+                EntityFieldId::from_name,
+                |id, bit, origin, angles, skin_seq, animtime| match id {
+                    EntityFieldId::Origin0 | EntityFieldId::Origin1 | EntityFieldId::Origin2 => {
+                        *origin |= bit;
+                    }
+                    EntityFieldId::Angles0 | EntityFieldId::Angles1 | EntityFieldId::Angles2 => {
+                        *angles |= bit;
+                    }
+                    EntityFieldId::Skin | EntityFieldId::Sequence => {
+                        *skin_seq |= bit;
+                    }
+                    EntityFieldId::AnimTime => {
+                        *animtime |= bit;
+                    }
+                    _ => {}
+                },
+            ))
+        })
+    }
+
+    /// Precompiled field accessor plan for [`GoldSrcClientData`] (`clientdata_t`).
+    pub fn clientdata_plan(&self) -> &CompiledPlan<ClientDataFieldId> {
+        self.plans.clientdata.get_or_init(|| {
+            Box::new(CompiledPlan::compile(
+                &self.fields,
+                ClientDataFieldId::Unknown,
+                ClientDataFieldId::from_name,
+                |_, _, _, _, _, _| {},
+            ))
+        })
+    }
+
+    /// Precompiled field accessor plan for [`GoldSrcWeaponData`] (`weapon_data_t`).
+    pub fn weapondata_plan(&self) -> &CompiledPlan<WeaponDataFieldId> {
+        self.plans.weapondata.get_or_init(|| {
+            Box::new(CompiledPlan::compile(
+                &self.fields,
+                WeaponDataFieldId::Unknown,
+                WeaponDataFieldId::from_name,
+                |_, _, _, _, _, _| {},
+            ))
+        })
+    }
+
+    /// Precompiled field accessor plan for [`GoldSrcUserCmd`] (`usercmd_t`).
+    pub fn usercmd_plan(&self) -> &CompiledPlan<UserCmdFieldId> {
+        self.plans.usercmd.get_or_init(|| {
+            Box::new(CompiledPlan::compile(
+                &self.fields,
+                UserCmdFieldId::Unknown,
+                UserCmdFieldId::from_name,
+                |_, _, _, _, _, _| {},
+            ))
+        })
     }
 
     pub fn zero_record(&self) -> DeltaRecord {
@@ -110,6 +319,351 @@ impl DeltaSchema {
             })
             .collect();
         DeltaRecord { values }
+    }
+}
+
+/// Compact field identifier for [`GoldSrcEntityState`] schemas (`entity_state_t`,
+/// `entity_state_player_t`, `custom_entity_state_t`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityFieldId {
+    Unknown = 0,
+    AnimTime,
+    Frame,
+    Origin0,
+    Origin1,
+    Origin2,
+    Angles0,
+    Angles1,
+    Angles2,
+    Sequence,
+    GaitSequence,
+    ModelIndex,
+    MoveType,
+    Solid,
+    Mins0,
+    Mins1,
+    Mins2,
+    Maxs0,
+    Maxs1,
+    Maxs2,
+    WeaponModel,
+    Owner,
+    Effects,
+    ColorMap,
+    FrameRate,
+    Skin,
+    Body,
+    RenderMode,
+    RenderAmt,
+    RenderFx,
+    Scale,
+    Aiment,
+    UseHull,
+    Spectator,
+    EFlags,
+    RenderColorR,
+    RenderColorG,
+    RenderColorB,
+    Controller0,
+    Controller1,
+    Controller2,
+    Controller3,
+    Blending0,
+    Blending1,
+    Friction,
+    Gravity,
+    BaseVelocity0,
+    BaseVelocity1,
+    BaseVelocity2,
+    StartPos0,
+    StartPos1,
+    StartPos2,
+    EndPos0,
+    EndPos1,
+    EndPos2,
+    ImpactTime,
+    StartTime,
+    IUser4,
+}
+
+impl EntityFieldId {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "animtime" => Self::AnimTime,
+            "frame" => Self::Frame,
+            "origin[0]" => Self::Origin0,
+            "origin[1]" => Self::Origin1,
+            "origin[2]" => Self::Origin2,
+            "angles[0]" => Self::Angles0,
+            "angles[1]" => Self::Angles1,
+            "angles[2]" => Self::Angles2,
+            "sequence" => Self::Sequence,
+            "gaitsequence" => Self::GaitSequence,
+            "modelindex" => Self::ModelIndex,
+            "movetype" => Self::MoveType,
+            "solid" => Self::Solid,
+            "mins[0]" => Self::Mins0,
+            "mins[1]" => Self::Mins1,
+            "mins[2]" => Self::Mins2,
+            "maxs[0]" => Self::Maxs0,
+            "maxs[1]" => Self::Maxs1,
+            "maxs[2]" => Self::Maxs2,
+            "weaponmodel" => Self::WeaponModel,
+            "owner" => Self::Owner,
+            "effects" => Self::Effects,
+            "colormap" => Self::ColorMap,
+            "framerate" => Self::FrameRate,
+            "skin" => Self::Skin,
+            "body" => Self::Body,
+            "rendermode" => Self::RenderMode,
+            "renderamt" => Self::RenderAmt,
+            "renderfx" => Self::RenderFx,
+            "scale" => Self::Scale,
+            "aiment" => Self::Aiment,
+            "usehull" => Self::UseHull,
+            "spectator" => Self::Spectator,
+            "eflags" => Self::EFlags,
+            "rendercolor.r" => Self::RenderColorR,
+            "rendercolor.g" => Self::RenderColorG,
+            "rendercolor.b" => Self::RenderColorB,
+            "controller[0]" => Self::Controller0,
+            "controller[1]" => Self::Controller1,
+            "controller[2]" => Self::Controller2,
+            "controller[3]" => Self::Controller3,
+            "blending[0]" => Self::Blending0,
+            "blending[1]" => Self::Blending1,
+            "friction" => Self::Friction,
+            "gravity" => Self::Gravity,
+            "basevelocity[0]" => Self::BaseVelocity0,
+            "basevelocity[1]" => Self::BaseVelocity1,
+            "basevelocity[2]" => Self::BaseVelocity2,
+            "startpos[0]" => Self::StartPos0,
+            "startpos[1]" => Self::StartPos1,
+            "startpos[2]" => Self::StartPos2,
+            "endpos[0]" => Self::EndPos0,
+            "endpos[1]" => Self::EndPos1,
+            "endpos[2]" => Self::EndPos2,
+            "impacttime" => Self::ImpactTime,
+            "starttime" => Self::StartTime,
+            "iuser4" => Self::IUser4,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Compact field identifier for [`GoldSrcClientData`] (`clientdata_t`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientDataFieldId {
+    Unknown = 0,
+    Origin0,
+    Origin1,
+    Origin2,
+    Velocity0,
+    Velocity1,
+    Velocity2,
+    ViewModel,
+    PunchAngle0,
+    PunchAngle1,
+    PunchAngle2,
+    Flags,
+    WaterLevel,
+    ViewOfs2,
+    Health,
+    BInDuck,
+    Weapons,
+    AmmoNails,
+    AmmoShells,
+    AmmoCells,
+    AmmoRockets,
+    FlTimeStepSound,
+    FlDuckTime,
+    MaxSpeed,
+    MId,
+    MFlNextAttack,
+    Fov,
+    WeaponAnim,
+    DeadFlag,
+    IUser1,
+    IUser2,
+    IUser3,
+    IUser4,
+    PhysInfo,
+    FlSwimTime,
+    WaterJumpTime,
+    PushMsec,
+    FUser1,
+    FUser2,
+    FUser3,
+    VUser2_0,
+    VUser2_1,
+    VUser2_2,
+    VUser3_0,
+    VUser3_1,
+    VUser3_2,
+    VUser4_0,
+    VUser4_1,
+}
+
+impl ClientDataFieldId {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "origin[0]" => Self::Origin0,
+            "origin[1]" => Self::Origin1,
+            "origin[2]" => Self::Origin2,
+            "velocity[0]" => Self::Velocity0,
+            "velocity[1]" => Self::Velocity1,
+            "velocity[2]" => Self::Velocity2,
+            "viewmodel" => Self::ViewModel,
+            "punchangle[0]" => Self::PunchAngle0,
+            "punchangle[1]" => Self::PunchAngle1,
+            "punchangle[2]" => Self::PunchAngle2,
+            "flags" => Self::Flags,
+            "waterlevel" => Self::WaterLevel,
+            "view_ofs[2]" => Self::ViewOfs2,
+            "health" => Self::Health,
+            "bInDuck" => Self::BInDuck,
+            "weapons" => Self::Weapons,
+            "ammo_nails" => Self::AmmoNails,
+            "ammo_shells" => Self::AmmoShells,
+            "ammo_cells" => Self::AmmoCells,
+            "ammo_rockets" => Self::AmmoRockets,
+            "flTimeStepSound" => Self::FlTimeStepSound,
+            "flDuckTime" => Self::FlDuckTime,
+            "maxspeed" => Self::MaxSpeed,
+            "m_iId" => Self::MId,
+            "m_flNextAttack" => Self::MFlNextAttack,
+            "fov" => Self::Fov,
+            "weaponanim" => Self::WeaponAnim,
+            "deadflag" => Self::DeadFlag,
+            "iuser1" => Self::IUser1,
+            "iuser2" => Self::IUser2,
+            "iuser3" => Self::IUser3,
+            "iuser4" => Self::IUser4,
+            "physinfo" => Self::PhysInfo,
+            "flSwimTime" => Self::FlSwimTime,
+            "waterjumptime" => Self::WaterJumpTime,
+            "pushmsec" => Self::PushMsec,
+            "fuser1" => Self::FUser1,
+            "fuser2" => Self::FUser2,
+            "fuser3" => Self::FUser3,
+            "vuser2[0]" => Self::VUser2_0,
+            "vuser2[1]" => Self::VUser2_1,
+            "vuser2[2]" => Self::VUser2_2,
+            "vuser3[0]" => Self::VUser3_0,
+            "vuser3[1]" => Self::VUser3_1,
+            "vuser3[2]" => Self::VUser3_2,
+            "vuser4[0]" => Self::VUser4_0,
+            "vuser4[1]" => Self::VUser4_1,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Compact field identifier for [`GoldSrcWeaponData`] (`weapon_data_t`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponDataFieldId {
+    Unknown = 0,
+    MId,
+    MClip,
+    MFlNextPrimaryAttack,
+    MFlNextSecondaryAttack,
+    MFlTimeWeaponIdle,
+    MFInReload,
+    MFInSpecialReload,
+    MFlNextReload,
+    MFlPumpTime,
+    MFReloadTime,
+    MFAimedDamage,
+    MFNextAimBonus,
+    MFInZoom,
+    MIWeaponState,
+    IUser1,
+    IUser2,
+    IUser3,
+    IUser4,
+    FUser1,
+    FUser2,
+    FUser3,
+    FUser4,
+}
+
+impl WeaponDataFieldId {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "m_iId" => Self::MId,
+            "m_iClip" => Self::MClip,
+            "m_flNextPrimaryAttack" => Self::MFlNextPrimaryAttack,
+            "m_flNextSecondaryAttack" => Self::MFlNextSecondaryAttack,
+            "m_flTimeWeaponIdle" => Self::MFlTimeWeaponIdle,
+            "m_fInReload" => Self::MFInReload,
+            "m_fInSpecialReload" => Self::MFInSpecialReload,
+            "m_flNextReload" => Self::MFlNextReload,
+            "m_flPumpTime" => Self::MFlPumpTime,
+            "m_fReloadTime" => Self::MFReloadTime,
+            "m_fAimedDamage" => Self::MFAimedDamage,
+            "m_fNextAimBonus" => Self::MFNextAimBonus,
+            "m_fInZoom" => Self::MFInZoom,
+            "m_iWeaponState" => Self::MIWeaponState,
+            "iuser1" => Self::IUser1,
+            "iuser2" => Self::IUser2,
+            "iuser3" => Self::IUser3,
+            "iuser4" => Self::IUser4,
+            "fuser1" => Self::FUser1,
+            "fuser2" => Self::FUser2,
+            "fuser3" => Self::FUser3,
+            "fuser4" => Self::FUser4,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Compact field identifier for [`GoldSrcUserCmd`] (`usercmd_t`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserCmdFieldId {
+    Unknown = 0,
+    LerpMsec,
+    Msec,
+    ViewAngles0,
+    ViewAngles1,
+    ViewAngles2,
+    ForwardMove,
+    SideMove,
+    UpMove,
+    LightLevel,
+    Buttons,
+    Impulse,
+    WeaponSelect,
+    ImpactIndex,
+    ImpactPosition0,
+    ImpactPosition1,
+    ImpactPosition2,
+}
+
+impl UserCmdFieldId {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "lerp_msec" => Self::LerpMsec,
+            "msec" => Self::Msec,
+            "viewangles[0]" => Self::ViewAngles0,
+            "viewangles[1]" => Self::ViewAngles1,
+            "viewangles[2]" => Self::ViewAngles2,
+            "forwardmove" => Self::ForwardMove,
+            "sidemove" => Self::SideMove,
+            "upmove" => Self::UpMove,
+            "lightlevel" => Self::LightLevel,
+            "buttons" => Self::Buttons,
+            "impulse" => Self::Impulse,
+            "weaponselect" => Self::WeaponSelect,
+            "impact_index" => Self::ImpactIndex,
+            "impact_position[0]" => Self::ImpactPosition0,
+            "impact_position[1]" => Self::ImpactPosition1,
+            "impact_position[2]" => Self::ImpactPosition2,
+            _ => Self::Unknown,
+        }
     }
 }
 
@@ -357,6 +911,44 @@ impl<'a> DeltaMarks<'a> {
     pub fn is_set(&self, index: usize) -> bool {
         index < 64 && self.mask & (1u64 << index) != 0
     }
+
+    /// Sets every valid field bit in `bits` (`DELTA_SETBYINDEX` in bulk).
+    #[inline]
+    pub fn set_mask(&mut self, bits: u64) {
+        let len = self.schema.fields.len().min(64);
+        let valid = if len >= 64 { u64::MAX } else { (1u64 << len) - 1 };
+        self.mask |= bits & valid;
+    }
+
+    /// Clears every field bit in `bits` (`DELTA_UNSETBYINDEX` in bulk).
+    #[inline]
+    pub fn unset_mask(&mut self, bits: u64) {
+        self.mask &= !bits;
+    }
+
+    /// Precomputed bitmask of `origin[0..=2]` in this schema (zero `HashMap` lookups).
+    #[inline]
+    pub fn entity_origin_mask(&self) -> u64 {
+        self.schema.entity_plan().origin_mask
+    }
+
+    /// Precomputed bitmask of `angles[0..=2]` in this schema (zero `HashMap` lookups).
+    #[inline]
+    pub fn entity_angles_mask(&self) -> u64 {
+        self.schema.entity_plan().angles_mask
+    }
+
+    /// Precomputed bitmask of `skin` and `sequence` in this schema (zero `HashMap` lookups).
+    #[inline]
+    pub fn entity_skin_sequence_mask(&self) -> u64 {
+        self.schema.entity_plan().skin_seq_mask
+    }
+
+    /// Precomputed bitmask of `animtime` in this schema (zero `HashMap` lookups).
+    #[inline]
+    pub fn entity_animtime_mask(&self) -> u64 {
+        self.schema.entity_plan().animtime_mask
+    }
 }
 
 /// A conditional encoder (`delta_t::conditionalencode`): called with the record the delta starts
@@ -440,77 +1032,565 @@ pub fn write_delta_masked(
         w.write_bits(b as u32, 8);
     }
 
-    for (i, field) in schema.fields.iter().enumerate() {
-        if (mask & (1u64 << i)) == 0 {
-            continue;
-        }
-        let bits = field.significant_bits as u32;
-        let pre = field.premultiply as f64;
-        let signed = field.is_signed();
-
-        match field.base_type() {
-            DT_BYTE => {
-                if signed {
-                    let v = ((to.values[i].as_i32() as i8) as f64 * pre) as i8;
-                    w.write_sbits(v as i32, bits);
-                } else {
-                    let v = ((to.values[i].as_u32() as u8) as f64 * pre) as u8;
-                    w.write_bits(v as u32, bits);
-                }
-            }
-            DT_SHORT => {
-                if signed {
-                    let v = ((to.values[i].as_i32() as i16) as f64 * pre) as i16;
-                    w.write_sbits(v as i32, bits);
-                } else {
-                    let v = ((to.values[i].as_u32() as u16) as f64 * pre) as u16;
-                    w.write_bits(v as u32, bits);
-                }
-            }
-            DT_FLOAT => {
-                let val = (to.values[i].as_f32() as f64) * pre;
-                if signed {
-                    w.write_sbits(val as i32, bits);
-                } else {
-                    w.write_bits(val as u32, bits);
-                }
-            }
-            DT_INTEGER => {
-                if signed {
-                    let mut v = to.values[i].as_i32();
-                    if !(0.9999..=1.0001).contains(&pre) {
-                        v = (v as f64 * pre) as i32;
-                    }
-                    w.write_sbits(v, bits);
-                } else {
-                    let mut v = to.values[i].as_u32();
-                    if !(0.9999..=1.0001).contains(&pre) {
-                        v = (v as f64 * pre) as u32;
-                    }
-                    w.write_bits(v, bits);
-                }
-            }
-            DT_ANGLE => {
-                w.write_bit_angle(to.values[i].as_f32(), bits);
-            }
-            DT_TIMEWINDOW_8 => {
-                let f2 = to.values[i].as_f32() as f64;
-                let tw = (time_base * 100.0) as i32 - (f2 * 100.0) as i32;
-                w.write_sbits(tw, 8);
-            }
-            DT_TIMEWINDOW_BIG => {
-                let f2 = to.values[i].as_f32() as f64;
-                let tw = (time_base * pre) as i32 - (f2 * pre) as i32;
-                w.write_sbits(tw, bits);
-            }
-            DT_STRING => {
-                w.write_bit_string(to.values[i].as_str());
-            }
-            _ => {}
-        }
+    let n = schema.fields.len().min(64);
+    let valid_mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+    let mut rem = mask & valid_mask;
+    while rem != 0 {
+        let i = rem.trailing_zeros() as usize;
+        rem &= rem - 1;
+        let field = &schema.fields[i];
+        let val = DeltaFieldRef::from_value(&to.values[i]);
+        write_wire_field(
+            w,
+            val,
+            field.base_type(),
+            field.is_signed(),
+            field.significant_bits as u32,
+            field.premultiply as f64,
+            (0.9999..=1.0001).contains(&(field.premultiply as f64)),
+            time_base,
+        );
     }
 
     last_bit.is_some()
+}
+
+/// Borrowed stack-only representation of a single delta field value during zero-alloc encoding.
+#[derive(Debug, Clone, Copy)]
+pub enum DeltaFieldRef<'a> {
+    Int(i32),
+    Uint(u32),
+    Float(f32),
+    Str(&'a str),
+}
+
+impl<'a> DeltaFieldRef<'a> {
+    #[inline]
+    fn from_value(v: &'a DeltaValue) -> Self {
+        match v {
+            DeltaValue::Int(x) => Self::Int(*x),
+            DeltaValue::Uint(x) => Self::Uint(*x),
+            DeltaValue::Float(x) => Self::Float(*x),
+            DeltaValue::Str(s) => Self::Str(s.as_str()),
+        }
+    }
+
+    #[inline]
+    fn zero_for(base_type: u32, signed: bool) -> Self {
+        match base_type {
+            DT_FLOAT | DT_ANGLE | DT_TIMEWINDOW_8 | DT_TIMEWINDOW_BIG => Self::Float(0.0),
+            DT_STRING => Self::Str(""),
+            _ if signed => Self::Int(0),
+            _ => Self::Uint(0),
+        }
+    }
+
+    #[inline]
+    fn int_for(v: i32, signed: bool) -> Self {
+        if signed {
+            Self::Int(v)
+        } else {
+            Self::Uint(v as u32)
+        }
+    }
+
+    #[inline]
+    fn uint_for(v: u32, signed: bool) -> Self {
+        if signed {
+            Self::Int(v as i32)
+        } else {
+            Self::Uint(v)
+        }
+    }
+
+    #[inline]
+    fn to_delta_value(self) -> DeltaValue {
+        match self {
+            Self::Int(v) => DeltaValue::Int(v),
+            Self::Uint(v) => DeltaValue::Uint(v),
+            Self::Float(v) => DeltaValue::Float(v),
+            Self::Str(s) => DeltaValue::Str(s.to_string()),
+        }
+    }
+
+    #[inline]
+    pub fn as_f32(self) -> f32 {
+        match self {
+            Self::Float(v) => v,
+            Self::Int(v) => v as f32,
+            Self::Uint(v) => v as f32,
+            Self::Str(_) => 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn as_i32(self) -> i32 {
+        match self {
+            Self::Int(v) => v,
+            Self::Uint(v) => v as i32,
+            Self::Float(v) => v as i32,
+            Self::Str(_) => 0,
+        }
+    }
+
+    #[inline]
+    pub fn as_u32(self) -> u32 {
+        match self {
+            Self::Uint(v) => v,
+            Self::Int(v) => v as u32,
+            Self::Float(v) => v as u32,
+            Self::Str(_) => 0,
+        }
+    }
+
+    #[inline]
+    pub fn as_str(self) -> &'a str {
+        match self {
+            Self::Str(s) => s,
+            _ => "",
+        }
+    }
+
+    #[inline]
+    fn equals_wire(self, other: Self, base_type: u32) -> bool {
+        match base_type {
+            DT_BYTE => (self.as_u32() as u8) == (other.as_u32() as u8),
+            DT_SHORT => (self.as_u32() as u16) == (other.as_u32() as u16),
+            DT_INTEGER => self.as_u32() == other.as_u32(),
+            DT_FLOAT | DT_ANGLE | DT_TIMEWINDOW_8 | DT_TIMEWINDOW_BIG => {
+                self.as_f32().to_bits() == other.as_f32().to_bits()
+            }
+            DT_STRING => self.as_str().eq_ignore_ascii_case(other.as_str()),
+            _ => true,
+        }
+    }
+}
+
+/// Decoded single field value passed into [`DeltaStruct::write_field`] without `Vec` allocation.
+pub enum DecodedField {
+    Int(i32),
+    Uint(u32),
+    Float(f32),
+    Str(String),
+}
+
+impl DecodedField {
+    #[inline]
+    pub fn as_f32(&self) -> f32 {
+        match *self {
+            Self::Float(v) => v,
+            Self::Int(v) => v as f32,
+            Self::Uint(v) => v as f32,
+            Self::Str(_) => 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn as_i32(&self) -> i32 {
+        match *self {
+            Self::Int(v) => v,
+            Self::Uint(v) => v as i32,
+            Self::Float(v) => v as i32,
+            Self::Str(_) => 0,
+        }
+    }
+
+    #[inline]
+    pub fn as_u32(&self) -> u32 {
+        match *self {
+            Self::Uint(v) => v,
+            Self::Int(v) => v as u32,
+            Self::Float(v) => v as u32,
+            Self::Str(_) => 0,
+        }
+    }
+
+    #[inline]
+    pub fn into_string(self) -> String {
+        match self {
+            Self::Str(s) => s,
+            _ => String::new(),
+        }
+    }
+}
+
+/// GoldSrc wire struct supporting zero-allocation precompiled delta encoding and decoding.
+pub trait DeltaStruct: Sized {
+    type FieldId: Copy + Eq + 'static;
+
+    fn compiled_plan(schema: &DeltaSchema) -> &CompiledPlan<Self::FieldId>;
+    fn unknown_field_id() -> Self::FieldId;
+    fn read_field(&self, id: Self::FieldId, base_type: u32, signed: bool) -> DeltaFieldRef<'_>;
+    fn write_field(&mut self, id: Self::FieldId, val: DecodedField);
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn write_wire_field(
+    w: &mut MsgWriter,
+    val: DeltaFieldRef<'_>,
+    base_type: u32,
+    signed: bool,
+    bits: u32,
+    pre: f64,
+    pre_is_unit: bool,
+    time_base: f64,
+) {
+    match base_type {
+        DT_BYTE => {
+            if signed {
+                let v = ((val.as_i32() as i8) as f64 * pre) as i8;
+                w.write_sbits(v as i32, bits);
+            } else {
+                let v = ((val.as_u32() as u8) as f64 * pre) as u8;
+                w.write_bits(v as u32, bits);
+            }
+        }
+        DT_SHORT => {
+            if signed {
+                let v = ((val.as_i32() as i16) as f64 * pre) as i16;
+                w.write_sbits(v as i32, bits);
+            } else {
+                let v = ((val.as_u32() as u16) as f64 * pre) as u16;
+                w.write_bits(v as u32, bits);
+            }
+        }
+        DT_FLOAT => {
+            let scaled = (val.as_f32() as f64) * pre;
+            if signed {
+                w.write_sbits(scaled as i32, bits);
+            } else {
+                w.write_bits(scaled as u32, bits);
+            }
+        }
+        DT_INTEGER => {
+            if signed {
+                let mut v = val.as_i32();
+                if !pre_is_unit {
+                    v = (v as f64 * pre) as i32;
+                }
+                w.write_sbits(v, bits);
+            } else {
+                let mut v = val.as_u32();
+                if !pre_is_unit {
+                    v = (v as f64 * pre) as u32;
+                }
+                w.write_bits(v, bits);
+            }
+        }
+        DT_ANGLE => {
+            w.write_bit_angle(val.as_f32(), bits);
+        }
+        DT_TIMEWINDOW_8 => {
+            let f2 = val.as_f32() as f64;
+            let tw = (time_base * 100.0) as i32 - (f2 * 100.0) as i32;
+            w.write_sbits(tw, 8);
+        }
+        DT_TIMEWINDOW_BIG => {
+            let f2 = val.as_f32() as f64;
+            let tw = (time_base * pre) as i32 - (f2 * pre) as i32;
+            w.write_sbits(tw, bits);
+        }
+        DT_STRING => {
+            w.write_bit_string(val.as_str());
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn read_wire_field(
+    r: &mut MsgReader<'_>,
+    base_type: u32,
+    signed: bool,
+    bits: u32,
+    pre: f64,
+    post: f64,
+    pre_is_unit: bool,
+    post_is_unit: bool,
+    time_base: f64,
+) -> Option<DecodedField> {
+    let scale = |mut d: f64| -> f64 {
+        if !pre_is_unit && pre != 0.0 {
+            d /= pre;
+        }
+        if !post_is_unit {
+            d *= post;
+        }
+        d
+    };
+
+    match base_type {
+        DT_BYTE => {
+            if signed {
+                let d = scale(r.read_sbits(bits) as f64);
+                Some(DecodedField::Int((d as i8) as i32))
+            } else {
+                let d = scale(r.read_bits(bits) as f64);
+                Some(DecodedField::Uint((d as u8) as u32))
+            }
+        }
+        DT_SHORT => {
+            if signed {
+                let d = scale(r.read_sbits(bits) as f64);
+                Some(DecodedField::Int((d as i16) as i32))
+            } else {
+                let d = scale(r.read_bits(bits) as f64);
+                Some(DecodedField::Uint((d as u16) as u32))
+            }
+        }
+        DT_FLOAT => {
+            let raw = if signed {
+                r.read_sbits(bits) as f64
+            } else {
+                r.read_bits(bits) as f64
+            };
+            Some(DecodedField::Float(scale(raw) as f32))
+        }
+        DT_INTEGER => {
+            if signed {
+                let d = scale(r.read_sbits(bits) as f64);
+                Some(DecodedField::Int(d as i32))
+            } else {
+                let d = scale(r.read_bits(bits) as f64);
+                Some(DecodedField::Uint(d as u32))
+            }
+        }
+        DT_ANGLE => Some(DecodedField::Float(r.read_bit_angle(bits))),
+        DT_TIMEWINDOW_8 => {
+            let addt = r.read_sbits(8) as f64;
+            let t = (time_base * 100.0 - addt) / 100.0;
+            Some(DecodedField::Float(t as f32))
+        }
+        DT_TIMEWINDOW_BIG => {
+            let addt = r.read_sbits(bits) as f64;
+            let t = if !pre_is_unit && pre != 0.0 {
+                (time_base * pre - addt) / pre
+            } else {
+                time_base - addt
+            };
+            Some(DecodedField::Float(t as f32))
+        }
+        DT_STRING => Some(DecodedField::Str(r.read_bit_string())),
+        _ => None,
+    }
+}
+
+/// Conditional encoder callback for direct struct-to-bitstream encoding (zero [`DeltaRecord`]
+/// allocations).
+pub type StructDeltaEncodeFn<'e, T> = &'e mut dyn FnMut(&T, &T, &mut DeltaMarks<'_>);
+
+/// Computes the 64-bit changed-field bitmask between `from` and `to` directly via `schema`'s
+/// precompiled [`CompiledPlan`] (zero heap allocations).
+pub fn struct_delta_mask<T: DeltaStruct>(schema: &DeltaSchema, from: &T, to: &T) -> u64 {
+    let plan = T::compiled_plan(schema);
+    let mut mask = 0u64;
+    for (i, slot) in plan.slots[..plan.len].iter().enumerate() {
+        let a = from.read_field(slot.field_id, slot.base_type, slot.signed);
+        let b = to.read_field(slot.field_id, slot.base_type, slot.signed);
+        if !a.equals_wire(b, slot.base_type) {
+            mask |= 1u64 << i;
+        }
+    }
+    mask
+}
+
+/// [`struct_delta_mask`] with an optional conditional encoder running on stack [`DeltaMarks`].
+pub fn struct_delta_mask_encoded<T: DeltaStruct>(
+    schema: &DeltaSchema,
+    from: &T,
+    to: &T,
+    encode: Option<StructDeltaEncodeFn<'_, T>>,
+) -> u64 {
+    let mask = struct_delta_mask(schema, from, to);
+    match encode {
+        Some(encode) => {
+            let mut marks = DeltaMarks { schema, mask };
+            encode(from, to, &mut marks);
+            marks.mask
+        }
+        None => mask,
+    }
+}
+
+/// Computes the 64-bit changed-field bitmask comparing an existing [`DeltaRecord`] `from`
+/// against a typed struct `to` without allocating a [`DeltaRecord`] for `to`.
+pub fn struct_vs_record_delta_mask<T: DeltaStruct>(
+    schema: &DeltaSchema,
+    from: &DeltaRecord,
+    to: &T,
+) -> u64 {
+    let plan = T::compiled_plan(schema);
+    let mut mask = 0u64;
+    for (i, slot) in plan.slots[..plan.len].iter().enumerate() {
+        let a = from
+            .values
+            .get(i)
+            .map(DeltaFieldRef::from_value)
+            .unwrap_or_else(|| DeltaFieldRef::zero_for(slot.base_type, slot.signed));
+        let b = to.read_field(slot.field_id, slot.base_type, slot.signed);
+        if !a.equals_wire(b, slot.base_type) {
+            mask |= 1u64 << i;
+        }
+    }
+    mask
+}
+
+/// Returns `true` if any wire field in `schema` differs between `from` and `to` (zero allocs).
+pub fn has_struct_delta_changes<T: DeltaStruct>(schema: &DeltaSchema, from: &T, to: &T) -> bool {
+    struct_delta_mask(schema, from, to) != 0
+}
+
+/// Writes the fields of `to` selected by `mask` directly into `w` via `schema`'s precompiled
+/// [`CompiledPlan`] (zero heap allocations). Returns `true` if `mask != 0`.
+pub fn write_struct_delta_masked<T: DeltaStruct>(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    to: &T,
+    mask: u64,
+    force: bool,
+    time_base: f64,
+) -> bool {
+    let last_bit = (mask != 0).then(|| 63 - mask.leading_zeros() as usize);
+    if last_bit.is_none() && !force {
+        return false;
+    }
+
+    let byte_count = match last_bit {
+        Some(lb) => (lb >> 3) + 1,
+        None => 0,
+    };
+    w.write_bits(byte_count as u32, 3);
+    let mask_bytes = mask.to_le_bytes();
+    for &b in &mask_bytes[..byte_count] {
+        w.write_bits(b as u32, 8);
+    }
+
+    let plan = T::compiled_plan(schema);
+    let mut rem = mask & plan.valid_mask;
+    while rem != 0 {
+        let i = rem.trailing_zeros() as usize;
+        rem &= rem - 1;
+        let slot = &plan.slots[i];
+        let val = to.read_field(slot.field_id, slot.base_type, slot.signed);
+        write_wire_field(
+            w,
+            val,
+            slot.base_type,
+            slot.signed,
+            slot.bits,
+            slot.pre,
+            slot.pre_is_unit,
+            time_base,
+        );
+    }
+
+    last_bit.is_some()
+}
+
+/// Zero-allocation direct struct-to-bitstream delta encoder. Produces bit-for-bit identical wire
+/// output to `to_delta() + write_delta()`.
+pub fn write_struct_delta<T: DeltaStruct>(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    from: &T,
+    to: &T,
+    force: bool,
+    time_base: f64,
+) -> bool {
+    let mask = struct_delta_mask(schema, from, to);
+    write_struct_delta_masked(w, schema, to, mask, force, time_base)
+}
+
+/// [`write_struct_delta`] with an optional conditional encoder running on stack [`DeltaMarks`].
+pub fn write_struct_delta_encoded<T: DeltaStruct>(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    from: &T,
+    to: &T,
+    force: bool,
+    time_base: f64,
+    encode: Option<StructDeltaEncodeFn<'_, T>>,
+) -> bool {
+    let mask = struct_delta_mask_encoded(schema, from, to, encode);
+    write_struct_delta_masked(w, schema, to, mask, force, time_base)
+}
+
+/// Direct struct-to-bitstream delta encoder against a [`DeltaRecord`] baseline (zero allocations).
+pub fn write_struct_delta_from_record<T: DeltaStruct>(
+    w: &mut MsgWriter,
+    schema: &DeltaSchema,
+    from: &DeltaRecord,
+    to: &T,
+    force: bool,
+    time_base: f64,
+) -> bool {
+    let mask = struct_vs_record_delta_mask(schema, from, to);
+    write_struct_delta_masked(w, schema, to, mask, force, time_base)
+}
+
+/// Zero-allocation direct bitstream-to-struct delta decoder writing changed fields in place
+/// into `out` (which starts from the previous/base state).
+pub fn read_struct_delta_into<T: DeltaStruct>(
+    r: &mut MsgReader<'_>,
+    schema: &DeltaSchema,
+    out: &mut T,
+    time_base: f64,
+) -> Result<(), ProtoError> {
+    let nbytes = r.read_bits(3) as usize;
+    if r.is_bad_read() {
+        return Err(ProtoError::UnexpectedEof);
+    }
+    let mut mask_bytes = [0u8; 8];
+    for slot in mask_bytes.iter_mut().take(nbytes.min(8)) {
+        *slot = r.read_bits(8) as u8;
+    }
+    if r.is_bad_read() {
+        return Err(ProtoError::UnexpectedEof);
+    }
+    let mask = u64::from_le_bytes(mask_bytes);
+
+    let plan = T::compiled_plan(schema);
+    let unknown = T::unknown_field_id();
+    let mut rem = mask & plan.valid_mask;
+    while rem != 0 {
+        let i = rem.trailing_zeros() as usize;
+        rem &= rem - 1;
+        let slot = &plan.slots[i];
+        if let Some(val) = read_wire_field(
+            r,
+            slot.base_type,
+            slot.signed,
+            slot.bits,
+            slot.pre,
+            slot.post,
+            slot.pre_is_unit,
+            slot.post_is_unit,
+            time_base,
+        ) && slot.field_id != unknown
+        {
+            out.write_field(slot.field_id, val);
+        }
+        if r.is_bad_read() {
+            return Err(ProtoError::UnexpectedEof);
+        }
+    }
+
+    Ok(())
+}
+
+/// Direct bitstream-to-struct delta decoder returning a new `T` cloned from `from` with all
+/// changed wire fields applied in place (zero [`DeltaRecord`] allocations).
+pub fn read_struct_delta<T: DeltaStruct + Clone>(
+    r: &mut MsgReader<'_>,
+    schema: &DeltaSchema,
+    from: &T,
+    time_base: f64,
+) -> Result<T, ProtoError> {
+    let mut out = from.clone();
+    read_struct_delta_into(r, schema, &mut out, time_base)?;
+    Ok(out)
 }
 
 /// Check whether two records differ without writing anything (`DELTA_CheckDelta`).
@@ -554,82 +1634,32 @@ pub fn read_delta(
     }
     let mask = u64::from_le_bytes(mask_bytes);
 
-    for (i, field) in schema.fields.iter().enumerate() {
-        if i >= 64 || (mask & (1u64 << i)) == 0 {
-            continue;
-        }
-        let bits = field.significant_bits as u32;
+    let n = schema.fields.len().min(64);
+    let valid_mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+    let mut rem = mask & valid_mask;
+    while rem != 0 {
+        let i = rem.trailing_zeros() as usize;
+        rem &= rem - 1;
+        let field = &schema.fields[i];
         let pre = field.premultiply as f64;
         let post = field.postmultiply as f64;
-        let signed = field.is_signed();
-
-        let scale = |mut d: f64| -> f64 {
-            if !(0.9999..=1.0001).contains(&pre) && pre != 0.0 {
-                d /= pre;
-            }
-            if !(0.9999..=1.0001).contains(&post) {
-                d *= post;
-            }
-            d
-        };
-
-        match field.base_type() {
-            DT_BYTE => {
-                if signed {
-                    let d = scale(r.read_sbits(bits) as f64);
-                    to.values[i] = DeltaValue::Int((d as i8) as i32);
-                } else {
-                    let d = scale(r.read_bits(bits) as f64);
-                    to.values[i] = DeltaValue::Uint((d as u8) as u32);
-                }
-            }
-            DT_SHORT => {
-                if signed {
-                    let d = scale(r.read_sbits(bits) as f64);
-                    to.values[i] = DeltaValue::Int((d as i16) as i32);
-                } else {
-                    let d = scale(r.read_bits(bits) as f64);
-                    to.values[i] = DeltaValue::Uint((d as u16) as u32);
-                }
-            }
-            DT_FLOAT => {
-                let raw = if signed {
-                    r.read_sbits(bits) as f64
-                } else {
-                    r.read_bits(bits) as f64
-                };
-                to.values[i] = DeltaValue::Float(scale(raw) as f32);
-            }
-            DT_INTEGER => {
-                if signed {
-                    let d = scale(r.read_sbits(bits) as f64);
-                    to.values[i] = DeltaValue::Int(d as i32);
-                } else {
-                    let d = scale(r.read_bits(bits) as f64);
-                    to.values[i] = DeltaValue::Uint(d as u32);
-                }
-            }
-            DT_ANGLE => {
-                to.values[i] = DeltaValue::Float(r.read_bit_angle(bits));
-            }
-            DT_TIMEWINDOW_8 => {
-                let addt = r.read_sbits(8) as f64;
-                let t = (time_base * 100.0 - addt) / 100.0;
-                to.values[i] = DeltaValue::Float(t as f32);
-            }
-            DT_TIMEWINDOW_BIG => {
-                let addt = r.read_sbits(bits) as f64;
-                let t = if !(0.9999..=1.0001).contains(&pre) && pre != 0.0 {
-                    (time_base * pre - addt) / pre
-                } else {
-                    time_base - addt
-                };
-                to.values[i] = DeltaValue::Float(t as f32);
-            }
-            DT_STRING => {
-                to.values[i] = DeltaValue::Str(r.read_bit_string());
-            }
-            _ => {}
+        if let Some(decoded) = read_wire_field(
+            r,
+            field.base_type(),
+            field.is_signed(),
+            field.significant_bits as u32,
+            pre,
+            post,
+            (0.9999..=1.0001).contains(&pre),
+            (0.9999..=1.0001).contains(&post),
+            time_base,
+        ) {
+            to.values[i] = match decoded {
+                DecodedField::Int(v) => DeltaValue::Int(v),
+                DecodedField::Uint(v) => DeltaValue::Uint(v),
+                DecodedField::Float(v) => DeltaValue::Float(v),
+                DecodedField::Str(s) => DeltaValue::Str(s),
+            };
         }
 
         if r.is_bad_read() {
@@ -870,51 +1900,111 @@ pub struct GoldSrcUserCmd {
     pub impact_position: Vec3,
 }
 
+fn to_delta_via_plan<T: DeltaStruct>(val: &T, schema: &DeltaSchema) -> DeltaRecord {
+    let plan = T::compiled_plan(schema);
+    let mut values = Vec::with_capacity(schema.fields.len());
+    for slot in &plan.slots[..plan.len] {
+        values.push(
+            val.read_field(slot.field_id, slot.base_type, slot.signed)
+                .to_delta_value(),
+        );
+    }
+    for field in schema.fields.iter().skip(plan.len) {
+        values.push(
+            DeltaFieldRef::zero_for(field.base_type(), field.is_signed()).to_delta_value(),
+        );
+    }
+    DeltaRecord { values }
+}
+
+fn from_delta_via_plan<T: DeltaStruct>(mut out: T, rec: &DeltaRecord, schema: &DeltaSchema) -> T {
+    let plan = T::compiled_plan(schema);
+    let unknown = T::unknown_field_id();
+    let count = plan.len.min(rec.values.len());
+    for (slot, val) in plan.slots[..count].iter().zip(&rec.values[..count]) {
+        if slot.field_id == unknown {
+            continue;
+        }
+        let decoded = match val {
+            DeltaValue::Int(v) => DecodedField::Int(*v),
+            DeltaValue::Uint(v) => DecodedField::Uint(*v),
+            DeltaValue::Float(v) => DecodedField::Float(*v),
+            DeltaValue::Str(s) => DecodedField::Str(s.clone()),
+        };
+        out.write_field(slot.field_id, decoded);
+    }
+    out
+}
+
+impl DeltaStruct for GoldSrcUserCmd {
+    type FieldId = UserCmdFieldId;
+
+    #[inline]
+    fn compiled_plan(schema: &DeltaSchema) -> &CompiledPlan<Self::FieldId> {
+        schema.usercmd_plan()
+    }
+
+    #[inline]
+    fn unknown_field_id() -> Self::FieldId {
+        UserCmdFieldId::Unknown
+    }
+
+    #[inline]
+    fn read_field(&self, id: Self::FieldId, base_type: u32, signed: bool) -> DeltaFieldRef<'_> {
+        match id {
+            UserCmdFieldId::LerpMsec => DeltaFieldRef::int_for(self.lerp_msec as i32, signed),
+            UserCmdFieldId::Msec => DeltaFieldRef::uint_for(self.msec as u32, signed),
+            UserCmdFieldId::ViewAngles0 => DeltaFieldRef::Float(self.viewangles.x),
+            UserCmdFieldId::ViewAngles1 => DeltaFieldRef::Float(self.viewangles.y),
+            UserCmdFieldId::ViewAngles2 => DeltaFieldRef::Float(self.viewangles.z),
+            UserCmdFieldId::ForwardMove => DeltaFieldRef::Float(self.forwardmove),
+            UserCmdFieldId::SideMove => DeltaFieldRef::Float(self.sidemove),
+            UserCmdFieldId::UpMove => DeltaFieldRef::Float(self.upmove),
+            UserCmdFieldId::LightLevel => DeltaFieldRef::uint_for(self.lightlevel as u32, signed),
+            UserCmdFieldId::Buttons => DeltaFieldRef::uint_for(self.buttons as u32, signed),
+            UserCmdFieldId::Impulse => DeltaFieldRef::uint_for(self.impulse as u32, signed),
+            UserCmdFieldId::WeaponSelect => {
+                DeltaFieldRef::uint_for(self.weaponselect as u32, signed)
+            }
+            UserCmdFieldId::ImpactIndex => DeltaFieldRef::int_for(self.impact_index, signed),
+            UserCmdFieldId::ImpactPosition0 => DeltaFieldRef::Float(self.impact_position.x),
+            UserCmdFieldId::ImpactPosition1 => DeltaFieldRef::Float(self.impact_position.y),
+            UserCmdFieldId::ImpactPosition2 => DeltaFieldRef::Float(self.impact_position.z),
+            UserCmdFieldId::Unknown => DeltaFieldRef::zero_for(base_type, signed),
+        }
+    }
+
+    #[inline]
+    fn write_field(&mut self, id: Self::FieldId, val: DecodedField) {
+        match id {
+            UserCmdFieldId::LerpMsec => self.lerp_msec = val.as_i32() as i16,
+            UserCmdFieldId::Msec => self.msec = val.as_u32() as u8,
+            UserCmdFieldId::ViewAngles0 => self.viewangles.x = val.as_f32(),
+            UserCmdFieldId::ViewAngles1 => self.viewangles.y = val.as_f32(),
+            UserCmdFieldId::ViewAngles2 => self.viewangles.z = val.as_f32(),
+            UserCmdFieldId::ForwardMove => self.forwardmove = val.as_f32(),
+            UserCmdFieldId::SideMove => self.sidemove = val.as_f32(),
+            UserCmdFieldId::UpMove => self.upmove = val.as_f32(),
+            UserCmdFieldId::LightLevel => self.lightlevel = val.as_u32() as u8,
+            UserCmdFieldId::Buttons => self.buttons = val.as_u32() as u16,
+            UserCmdFieldId::Impulse => self.impulse = val.as_u32() as u8,
+            UserCmdFieldId::WeaponSelect => self.weaponselect = val.as_u32() as u8,
+            UserCmdFieldId::ImpactIndex => self.impact_index = val.as_i32(),
+            UserCmdFieldId::ImpactPosition0 => self.impact_position.x = val.as_f32(),
+            UserCmdFieldId::ImpactPosition1 => self.impact_position.y = val.as_f32(),
+            UserCmdFieldId::ImpactPosition2 => self.impact_position.z = val.as_f32(),
+            UserCmdFieldId::Unknown => {}
+        }
+    }
+}
+
 impl GoldSrcUserCmd {
     pub fn to_delta(&self, schema: &DeltaSchema) -> DeltaRecord {
-        let mut rec = schema.zero_record();
-        rec.set_i32(schema, "lerp_msec", self.lerp_msec as i32);
-        rec.set_u32(schema, "msec", self.msec as u32);
-        rec.set_f32(schema, "viewangles[0]", self.viewangles.x);
-        rec.set_f32(schema, "viewangles[1]", self.viewangles.y);
-        rec.set_f32(schema, "viewangles[2]", self.viewangles.z);
-        rec.set_f32(schema, "forwardmove", self.forwardmove);
-        rec.set_f32(schema, "sidemove", self.sidemove);
-        rec.set_f32(schema, "upmove", self.upmove);
-        rec.set_u32(schema, "lightlevel", self.lightlevel as u32);
-        rec.set_u32(schema, "buttons", self.buttons as u32);
-        rec.set_u32(schema, "impulse", self.impulse as u32);
-        rec.set_u32(schema, "weaponselect", self.weaponselect as u32);
-        rec.set_i32(schema, "impact_index", self.impact_index);
-        rec.set_f32(schema, "impact_position[0]", self.impact_position.x);
-        rec.set_f32(schema, "impact_position[1]", self.impact_position.y);
-        rec.set_f32(schema, "impact_position[2]", self.impact_position.z);
-        rec
+        to_delta_via_plan(self, schema)
     }
 
     pub fn from_delta(rec: &DeltaRecord, schema: &DeltaSchema) -> Self {
-        Self {
-            lerp_msec: rec.get_i32(schema, "lerp_msec") as i16,
-            msec: rec.get_u32(schema, "msec") as u8,
-            viewangles: Vec3::new(
-                rec.get_f32(schema, "viewangles[0]"),
-                rec.get_f32(schema, "viewangles[1]"),
-                rec.get_f32(schema, "viewangles[2]"),
-            ),
-            forwardmove: rec.get_f32(schema, "forwardmove"),
-            sidemove: rec.get_f32(schema, "sidemove"),
-            upmove: rec.get_f32(schema, "upmove"),
-            lightlevel: rec.get_u32(schema, "lightlevel") as u8,
-            buttons: rec.get_u32(schema, "buttons") as u16,
-            impulse: rec.get_u32(schema, "impulse") as u8,
-            weaponselect: rec.get_u32(schema, "weaponselect") as u8,
-            impact_index: rec.get_i32(schema, "impact_index"),
-            impact_position: Vec3::new(
-                rec.get_f32(schema, "impact_position[0]"),
-                rec.get_f32(schema, "impact_position[1]"),
-                rec.get_f32(schema, "impact_position[2]"),
-            ),
-        }
+        from_delta_via_plan(Self::default(), rec, schema)
     }
 }
 
@@ -965,120 +2055,139 @@ pub struct GoldSrcClientData {
     pub vuser4: Vec3,
 }
 
+impl DeltaStruct for GoldSrcClientData {
+    type FieldId = ClientDataFieldId;
+
+    #[inline]
+    fn compiled_plan(schema: &DeltaSchema) -> &CompiledPlan<Self::FieldId> {
+        schema.clientdata_plan()
+    }
+
+    #[inline]
+    fn unknown_field_id() -> Self::FieldId {
+        ClientDataFieldId::Unknown
+    }
+
+    #[inline]
+    fn read_field(&self, id: Self::FieldId, base_type: u32, signed: bool) -> DeltaFieldRef<'_> {
+        match id {
+            ClientDataFieldId::Origin0 => DeltaFieldRef::Float(self.origin.x),
+            ClientDataFieldId::Origin1 => DeltaFieldRef::Float(self.origin.y),
+            ClientDataFieldId::Origin2 => DeltaFieldRef::Float(self.origin.z),
+            ClientDataFieldId::Velocity0 => DeltaFieldRef::Float(self.velocity.x),
+            ClientDataFieldId::Velocity1 => DeltaFieldRef::Float(self.velocity.y),
+            ClientDataFieldId::Velocity2 => DeltaFieldRef::Float(self.velocity.z),
+            ClientDataFieldId::ViewModel => DeltaFieldRef::int_for(self.viewmodel, signed),
+            ClientDataFieldId::PunchAngle0 => DeltaFieldRef::Float(self.punchangle.x),
+            ClientDataFieldId::PunchAngle1 => DeltaFieldRef::Float(self.punchangle.y),
+            ClientDataFieldId::PunchAngle2 => DeltaFieldRef::Float(self.punchangle.z),
+            ClientDataFieldId::Flags => DeltaFieldRef::uint_for(self.flags, signed),
+            ClientDataFieldId::WaterLevel => DeltaFieldRef::int_for(self.waterlevel, signed),
+            ClientDataFieldId::ViewOfs2 => DeltaFieldRef::Float(self.view_ofs.z),
+            ClientDataFieldId::Health => DeltaFieldRef::Float(self.health),
+            ClientDataFieldId::BInDuck => DeltaFieldRef::int_for(self.b_in_duck, signed),
+            ClientDataFieldId::Weapons => DeltaFieldRef::uint_for(self.weapons, signed),
+            ClientDataFieldId::AmmoNails => DeltaFieldRef::int_for(self.ammo_nails, signed),
+            ClientDataFieldId::AmmoShells => DeltaFieldRef::int_for(self.ammo_shells, signed),
+            ClientDataFieldId::AmmoCells => DeltaFieldRef::int_for(self.ammo_cells, signed),
+            ClientDataFieldId::AmmoRockets => DeltaFieldRef::int_for(self.ammo_rockets, signed),
+            ClientDataFieldId::FlTimeStepSound => {
+                DeltaFieldRef::int_for(self.fl_time_step_sound, signed)
+            }
+            ClientDataFieldId::FlDuckTime => DeltaFieldRef::int_for(self.fl_duck_time, signed),
+            ClientDataFieldId::MaxSpeed => DeltaFieldRef::Float(self.maxspeed),
+            ClientDataFieldId::MId => DeltaFieldRef::int_for(self.m_i_id, signed),
+            ClientDataFieldId::MFlNextAttack => DeltaFieldRef::Float(self.m_fl_next_attack),
+            ClientDataFieldId::Fov => DeltaFieldRef::Float(self.fov),
+            ClientDataFieldId::WeaponAnim => DeltaFieldRef::int_for(self.weaponanim, signed),
+            ClientDataFieldId::DeadFlag => DeltaFieldRef::int_for(self.deadflag, signed),
+            ClientDataFieldId::IUser1 => DeltaFieldRef::int_for(self.iuser1, signed),
+            ClientDataFieldId::IUser2 => DeltaFieldRef::int_for(self.iuser2, signed),
+            ClientDataFieldId::IUser3 => DeltaFieldRef::int_for(self.iuser3, signed),
+            ClientDataFieldId::IUser4 => DeltaFieldRef::int_for(self.iuser4, signed),
+            ClientDataFieldId::PhysInfo => DeltaFieldRef::Str(self.physinfo.as_str()),
+            ClientDataFieldId::FlSwimTime => DeltaFieldRef::int_for(self.fl_swim_time, signed),
+            ClientDataFieldId::WaterJumpTime => {
+                DeltaFieldRef::int_for(self.waterjumptime, signed)
+            }
+            ClientDataFieldId::PushMsec => DeltaFieldRef::int_for(self.pushmsec, signed),
+            ClientDataFieldId::FUser1 => DeltaFieldRef::Float(self.fuser1),
+            ClientDataFieldId::FUser2 => DeltaFieldRef::Float(self.fuser2),
+            ClientDataFieldId::FUser3 => DeltaFieldRef::Float(self.fuser3),
+            ClientDataFieldId::VUser2_0 => DeltaFieldRef::Float(self.vuser2.x),
+            ClientDataFieldId::VUser2_1 => DeltaFieldRef::Float(self.vuser2.y),
+            ClientDataFieldId::VUser2_2 => DeltaFieldRef::Float(self.vuser2.z),
+            ClientDataFieldId::VUser3_0 => DeltaFieldRef::Float(self.vuser3.x),
+            ClientDataFieldId::VUser3_1 => DeltaFieldRef::Float(self.vuser3.y),
+            ClientDataFieldId::VUser3_2 => DeltaFieldRef::Float(self.vuser3.z),
+            ClientDataFieldId::VUser4_0 => DeltaFieldRef::Float(self.vuser4.x),
+            ClientDataFieldId::VUser4_1 => DeltaFieldRef::Float(self.vuser4.y),
+            ClientDataFieldId::Unknown => DeltaFieldRef::zero_for(base_type, signed),
+        }
+    }
+
+    #[inline]
+    fn write_field(&mut self, id: Self::FieldId, val: DecodedField) {
+        match id {
+            ClientDataFieldId::Origin0 => self.origin.x = val.as_f32(),
+            ClientDataFieldId::Origin1 => self.origin.y = val.as_f32(),
+            ClientDataFieldId::Origin2 => self.origin.z = val.as_f32(),
+            ClientDataFieldId::Velocity0 => self.velocity.x = val.as_f32(),
+            ClientDataFieldId::Velocity1 => self.velocity.y = val.as_f32(),
+            ClientDataFieldId::Velocity2 => self.velocity.z = val.as_f32(),
+            ClientDataFieldId::ViewModel => self.viewmodel = val.as_i32(),
+            ClientDataFieldId::PunchAngle0 => self.punchangle.x = val.as_f32(),
+            ClientDataFieldId::PunchAngle1 => self.punchangle.y = val.as_f32(),
+            ClientDataFieldId::PunchAngle2 => self.punchangle.z = val.as_f32(),
+            ClientDataFieldId::Flags => self.flags = val.as_u32(),
+            ClientDataFieldId::WaterLevel => self.waterlevel = val.as_i32(),
+            ClientDataFieldId::ViewOfs2 => self.view_ofs.z = val.as_f32(),
+            ClientDataFieldId::Health => self.health = val.as_f32(),
+            ClientDataFieldId::BInDuck => self.b_in_duck = val.as_i32(),
+            ClientDataFieldId::Weapons => self.weapons = val.as_u32(),
+            ClientDataFieldId::AmmoNails => self.ammo_nails = val.as_i32(),
+            ClientDataFieldId::AmmoShells => self.ammo_shells = val.as_i32(),
+            ClientDataFieldId::AmmoCells => self.ammo_cells = val.as_i32(),
+            ClientDataFieldId::AmmoRockets => self.ammo_rockets = val.as_i32(),
+            ClientDataFieldId::FlTimeStepSound => self.fl_time_step_sound = val.as_i32(),
+            ClientDataFieldId::FlDuckTime => self.fl_duck_time = val.as_i32(),
+            ClientDataFieldId::MaxSpeed => self.maxspeed = val.as_f32(),
+            ClientDataFieldId::MId => self.m_i_id = val.as_i32(),
+            ClientDataFieldId::MFlNextAttack => self.m_fl_next_attack = val.as_f32(),
+            ClientDataFieldId::Fov => self.fov = val.as_f32(),
+            ClientDataFieldId::WeaponAnim => self.weaponanim = val.as_i32(),
+            ClientDataFieldId::DeadFlag => self.deadflag = val.as_i32(),
+            ClientDataFieldId::IUser1 => self.iuser1 = val.as_i32(),
+            ClientDataFieldId::IUser2 => self.iuser2 = val.as_i32(),
+            ClientDataFieldId::IUser3 => self.iuser3 = val.as_i32(),
+            ClientDataFieldId::IUser4 => self.iuser4 = val.as_i32(),
+            ClientDataFieldId::PhysInfo => self.physinfo = val.into_string(),
+            ClientDataFieldId::FlSwimTime => self.fl_swim_time = val.as_i32(),
+            ClientDataFieldId::WaterJumpTime => self.waterjumptime = val.as_i32(),
+            ClientDataFieldId::PushMsec => self.pushmsec = val.as_i32(),
+            ClientDataFieldId::FUser1 => self.fuser1 = val.as_f32(),
+            ClientDataFieldId::FUser2 => self.fuser2 = val.as_f32(),
+            ClientDataFieldId::FUser3 => self.fuser3 = val.as_f32(),
+            ClientDataFieldId::VUser2_0 => self.vuser2.x = val.as_f32(),
+            ClientDataFieldId::VUser2_1 => self.vuser2.y = val.as_f32(),
+            ClientDataFieldId::VUser2_2 => self.vuser2.z = val.as_f32(),
+            ClientDataFieldId::VUser3_0 => self.vuser3.x = val.as_f32(),
+            ClientDataFieldId::VUser3_1 => self.vuser3.y = val.as_f32(),
+            ClientDataFieldId::VUser3_2 => self.vuser3.z = val.as_f32(),
+            ClientDataFieldId::VUser4_0 => self.vuser4.x = val.as_f32(),
+            ClientDataFieldId::VUser4_1 => self.vuser4.y = val.as_f32(),
+            ClientDataFieldId::Unknown => {}
+        }
+    }
+}
+
 impl GoldSrcClientData {
     pub fn to_delta(&self, schema: &DeltaSchema) -> DeltaRecord {
-        let mut rec = schema.zero_record();
-        rec.set_f32(schema, "origin[0]", self.origin.x);
-        rec.set_f32(schema, "origin[1]", self.origin.y);
-        rec.set_f32(schema, "origin[2]", self.origin.z);
-        rec.set_f32(schema, "velocity[0]", self.velocity.x);
-        rec.set_f32(schema, "velocity[1]", self.velocity.y);
-        rec.set_f32(schema, "velocity[2]", self.velocity.z);
-        rec.set_i32(schema, "viewmodel", self.viewmodel);
-        rec.set_f32(schema, "punchangle[0]", self.punchangle.x);
-        rec.set_f32(schema, "punchangle[1]", self.punchangle.y);
-        rec.set_f32(schema, "punchangle[2]", self.punchangle.z);
-        rec.set_u32(schema, "flags", self.flags);
-        rec.set_i32(schema, "waterlevel", self.waterlevel);
-        rec.set_f32(schema, "view_ofs[2]", self.view_ofs.z);
-        rec.set_f32(schema, "health", self.health);
-        rec.set_i32(schema, "bInDuck", self.b_in_duck);
-        rec.set_u32(schema, "weapons", self.weapons);
-        rec.set_i32(schema, "ammo_nails", self.ammo_nails);
-        rec.set_i32(schema, "ammo_shells", self.ammo_shells);
-        rec.set_i32(schema, "ammo_cells", self.ammo_cells);
-        rec.set_i32(schema, "ammo_rockets", self.ammo_rockets);
-        rec.set_i32(schema, "flTimeStepSound", self.fl_time_step_sound);
-        rec.set_i32(schema, "flDuckTime", self.fl_duck_time);
-        rec.set_f32(schema, "maxspeed", self.maxspeed);
-        rec.set_i32(schema, "m_iId", self.m_i_id);
-        rec.set_f32(schema, "m_flNextAttack", self.m_fl_next_attack);
-        rec.set_f32(schema, "fov", self.fov);
-        rec.set_i32(schema, "weaponanim", self.weaponanim);
-        rec.set_i32(schema, "deadflag", self.deadflag);
-        rec.set_i32(schema, "iuser1", self.iuser1);
-        rec.set_i32(schema, "iuser2", self.iuser2);
-        rec.set_i32(schema, "iuser3", self.iuser3);
-        rec.set_i32(schema, "iuser4", self.iuser4);
-        rec.set_str(schema, "physinfo", &self.physinfo);
-        rec.set_i32(schema, "flSwimTime", self.fl_swim_time);
-        rec.set_i32(schema, "waterjumptime", self.waterjumptime);
-        rec.set_i32(schema, "pushmsec", self.pushmsec);
-        rec.set_f32(schema, "fuser1", self.fuser1);
-        rec.set_f32(schema, "fuser2", self.fuser2);
-        rec.set_f32(schema, "fuser3", self.fuser3);
-        for (name, v) in [("vuser2", self.vuser2), ("vuser3", self.vuser3)] {
-            rec.set_f32(schema, &format!("{name}[0]"), v.x);
-            rec.set_f32(schema, &format!("{name}[1]"), v.y);
-            rec.set_f32(schema, &format!("{name}[2]"), v.z);
-        }
-        rec.set_f32(schema, "vuser4[0]", self.vuser4.x);
-        rec.set_f32(schema, "vuser4[1]", self.vuser4.y);
-        rec
+        to_delta_via_plan(self, schema)
     }
 
     pub fn from_delta(rec: &DeltaRecord, schema: &DeltaSchema) -> Self {
-        let vec3 = |name: &str| {
-            Vec3::new(
-                rec.get_f32(schema, &format!("{name}[0]")),
-                rec.get_f32(schema, &format!("{name}[1]")),
-                rec.get_f32(schema, &format!("{name}[2]")),
-            )
-        };
-        Self {
-            origin: Vec3::new(
-                rec.get_f32(schema, "origin[0]"),
-                rec.get_f32(schema, "origin[1]"),
-                rec.get_f32(schema, "origin[2]"),
-            ),
-            velocity: Vec3::new(
-                rec.get_f32(schema, "velocity[0]"),
-                rec.get_f32(schema, "velocity[1]"),
-                rec.get_f32(schema, "velocity[2]"),
-            ),
-            viewmodel: rec.get_i32(schema, "viewmodel"),
-            punchangle: Vec3::new(
-                rec.get_f32(schema, "punchangle[0]"),
-                rec.get_f32(schema, "punchangle[1]"),
-                rec.get_f32(schema, "punchangle[2]"),
-            ),
-            flags: rec.get_u32(schema, "flags"),
-            waterlevel: rec.get_i32(schema, "waterlevel"),
-            view_ofs: Vec3::new(0.0, 0.0, rec.get_f32(schema, "view_ofs[2]")),
-            health: rec.get_f32(schema, "health"),
-            b_in_duck: rec.get_i32(schema, "bInDuck"),
-            weapons: rec.get_u32(schema, "weapons"),
-            ammo_nails: rec.get_i32(schema, "ammo_nails"),
-            ammo_shells: rec.get_i32(schema, "ammo_shells"),
-            ammo_cells: rec.get_i32(schema, "ammo_cells"),
-            ammo_rockets: rec.get_i32(schema, "ammo_rockets"),
-            fl_time_step_sound: rec.get_i32(schema, "flTimeStepSound"),
-            fl_duck_time: rec.get_i32(schema, "flDuckTime"),
-            maxspeed: rec.get_f32(schema, "maxspeed"),
-            m_i_id: rec.get_i32(schema, "m_iId"),
-            m_fl_next_attack: rec.get_f32(schema, "m_flNextAttack"),
-            fov: rec.get_f32(schema, "fov"),
-            weaponanim: rec.get_i32(schema, "weaponanim"),
-            deadflag: rec.get_i32(schema, "deadflag"),
-            iuser1: rec.get_i32(schema, "iuser1"),
-            iuser2: rec.get_i32(schema, "iuser2"),
-            iuser3: rec.get_i32(schema, "iuser3"),
-            iuser4: rec.get_i32(schema, "iuser4"),
-            physinfo: rec.get_str(schema, "physinfo").to_string(),
-            fl_swim_time: rec.get_i32(schema, "flSwimTime"),
-            waterjumptime: rec.get_i32(schema, "waterjumptime"),
-            pushmsec: rec.get_i32(schema, "pushmsec"),
-            fuser1: rec.get_f32(schema, "fuser1"),
-            fuser2: rec.get_f32(schema, "fuser2"),
-            fuser3: rec.get_f32(schema, "fuser3"),
-            vuser2: vec3("vuser2"),
-            vuser3: vec3("vuser3"),
-            vuser4: Vec3::new(
-                rec.get_f32(schema, "vuser4[0]"),
-                rec.get_f32(schema, "vuser4[1]"),
-                0.0,
-            ),
-        }
+        from_delta_via_plan(Self::default(), rec, schema)
     }
 }
 
@@ -1113,60 +2222,100 @@ pub struct GoldSrcWeaponData {
     pub fuser4: f32,
 }
 
+impl DeltaStruct for GoldSrcWeaponData {
+    type FieldId = WeaponDataFieldId;
+
+    #[inline]
+    fn compiled_plan(schema: &DeltaSchema) -> &CompiledPlan<Self::FieldId> {
+        schema.weapondata_plan()
+    }
+
+    #[inline]
+    fn unknown_field_id() -> Self::FieldId {
+        WeaponDataFieldId::Unknown
+    }
+
+    #[inline]
+    fn read_field(&self, id: Self::FieldId, base_type: u32, signed: bool) -> DeltaFieldRef<'_> {
+        match id {
+            WeaponDataFieldId::MId => DeltaFieldRef::int_for(self.m_i_id, signed),
+            WeaponDataFieldId::MClip => DeltaFieldRef::int_for(self.m_i_clip, signed),
+            WeaponDataFieldId::MFlNextPrimaryAttack => {
+                DeltaFieldRef::Float(self.m_fl_next_primary_attack)
+            }
+            WeaponDataFieldId::MFlNextSecondaryAttack => {
+                DeltaFieldRef::Float(self.m_fl_next_secondary_attack)
+            }
+            WeaponDataFieldId::MFlTimeWeaponIdle => {
+                DeltaFieldRef::Float(self.m_fl_time_weapon_idle)
+            }
+            WeaponDataFieldId::MFInReload => DeltaFieldRef::int_for(self.m_f_in_reload, signed),
+            WeaponDataFieldId::MFInSpecialReload => {
+                DeltaFieldRef::int_for(self.m_f_in_special_reload, signed)
+            }
+            WeaponDataFieldId::MFlNextReload => DeltaFieldRef::Float(self.m_fl_next_reload),
+            WeaponDataFieldId::MFlPumpTime => DeltaFieldRef::Float(self.m_fl_pump_time),
+            WeaponDataFieldId::MFReloadTime => DeltaFieldRef::Float(self.m_f_reload_time),
+            WeaponDataFieldId::MFAimedDamage => DeltaFieldRef::Float(self.m_f_aimed_damage),
+            WeaponDataFieldId::MFNextAimBonus => DeltaFieldRef::Float(self.m_f_next_aim_bonus),
+            WeaponDataFieldId::MFInZoom => DeltaFieldRef::int_for(self.m_f_in_zoom, signed),
+            WeaponDataFieldId::MIWeaponState => {
+                DeltaFieldRef::int_for(self.m_i_weapon_state, signed)
+            }
+            WeaponDataFieldId::IUser1 => DeltaFieldRef::int_for(self.iuser1, signed),
+            WeaponDataFieldId::IUser2 => DeltaFieldRef::int_for(self.iuser2, signed),
+            WeaponDataFieldId::IUser3 => DeltaFieldRef::int_for(self.iuser3, signed),
+            WeaponDataFieldId::IUser4 => DeltaFieldRef::int_for(self.iuser4, signed),
+            WeaponDataFieldId::FUser1 => DeltaFieldRef::Float(self.fuser1),
+            WeaponDataFieldId::FUser2 => DeltaFieldRef::Float(self.fuser2),
+            WeaponDataFieldId::FUser3 => DeltaFieldRef::Float(self.fuser3),
+            WeaponDataFieldId::FUser4 => DeltaFieldRef::Float(self.fuser4),
+            WeaponDataFieldId::Unknown => DeltaFieldRef::zero_for(base_type, signed),
+        }
+    }
+
+    #[inline]
+    fn write_field(&mut self, id: Self::FieldId, val: DecodedField) {
+        match id {
+            WeaponDataFieldId::MId => self.m_i_id = val.as_i32(),
+            WeaponDataFieldId::MClip => self.m_i_clip = val.as_i32(),
+            WeaponDataFieldId::MFlNextPrimaryAttack => {
+                self.m_fl_next_primary_attack = val.as_f32()
+            }
+            WeaponDataFieldId::MFlNextSecondaryAttack => {
+                self.m_fl_next_secondary_attack = val.as_f32()
+            }
+            WeaponDataFieldId::MFlTimeWeaponIdle => self.m_fl_time_weapon_idle = val.as_f32(),
+            WeaponDataFieldId::MFInReload => self.m_f_in_reload = val.as_i32(),
+            WeaponDataFieldId::MFInSpecialReload => self.m_f_in_special_reload = val.as_i32(),
+            WeaponDataFieldId::MFlNextReload => self.m_fl_next_reload = val.as_f32(),
+            WeaponDataFieldId::MFlPumpTime => self.m_fl_pump_time = val.as_f32(),
+            WeaponDataFieldId::MFReloadTime => self.m_f_reload_time = val.as_f32(),
+            WeaponDataFieldId::MFAimedDamage => self.m_f_aimed_damage = val.as_f32(),
+            WeaponDataFieldId::MFNextAimBonus => self.m_f_next_aim_bonus = val.as_f32(),
+            WeaponDataFieldId::MFInZoom => self.m_f_in_zoom = val.as_i32(),
+            WeaponDataFieldId::MIWeaponState => self.m_i_weapon_state = val.as_i32(),
+            WeaponDataFieldId::IUser1 => self.iuser1 = val.as_i32(),
+            WeaponDataFieldId::IUser2 => self.iuser2 = val.as_i32(),
+            WeaponDataFieldId::IUser3 => self.iuser3 = val.as_i32(),
+            WeaponDataFieldId::IUser4 => self.iuser4 = val.as_i32(),
+            WeaponDataFieldId::FUser1 => self.fuser1 = val.as_f32(),
+            WeaponDataFieldId::FUser2 => self.fuser2 = val.as_f32(),
+            WeaponDataFieldId::FUser3 => self.fuser3 = val.as_f32(),
+            WeaponDataFieldId::FUser4 => self.fuser4 = val.as_f32(),
+            WeaponDataFieldId::Unknown => {}
+        }
+    }
+}
+
 impl GoldSrcWeaponData {
     /// The record of the fields the schema has.
     pub fn to_delta(&self, schema: &DeltaSchema) -> DeltaRecord {
-        let mut rec = schema.zero_record();
-        rec.set_i32(schema, "m_iId", self.m_i_id);
-        rec.set_i32(schema, "m_iClip", self.m_i_clip);
-        rec.set_f32(schema, "m_flNextPrimaryAttack", self.m_fl_next_primary_attack);
-        rec.set_f32(schema, "m_flNextSecondaryAttack", self.m_fl_next_secondary_attack);
-        rec.set_f32(schema, "m_flTimeWeaponIdle", self.m_fl_time_weapon_idle);
-        rec.set_i32(schema, "m_fInReload", self.m_f_in_reload);
-        rec.set_i32(schema, "m_fInSpecialReload", self.m_f_in_special_reload);
-        rec.set_f32(schema, "m_flNextReload", self.m_fl_next_reload);
-        rec.set_f32(schema, "m_flPumpTime", self.m_fl_pump_time);
-        rec.set_f32(schema, "m_fReloadTime", self.m_f_reload_time);
-        rec.set_f32(schema, "m_fAimedDamage", self.m_f_aimed_damage);
-        rec.set_f32(schema, "m_fNextAimBonus", self.m_f_next_aim_bonus);
-        rec.set_i32(schema, "m_fInZoom", self.m_f_in_zoom);
-        rec.set_i32(schema, "m_iWeaponState", self.m_i_weapon_state);
-        rec.set_i32(schema, "iuser1", self.iuser1);
-        rec.set_i32(schema, "iuser2", self.iuser2);
-        rec.set_i32(schema, "iuser3", self.iuser3);
-        rec.set_i32(schema, "iuser4", self.iuser4);
-        rec.set_f32(schema, "fuser1", self.fuser1);
-        rec.set_f32(schema, "fuser2", self.fuser2);
-        rec.set_f32(schema, "fuser3", self.fuser3);
-        rec.set_f32(schema, "fuser4", self.fuser4);
-        rec
+        to_delta_via_plan(self, schema)
     }
 
     pub fn from_delta(rec: &DeltaRecord, schema: &DeltaSchema) -> Self {
-        Self {
-            m_i_id: rec.get_i32(schema, "m_iId"),
-            m_i_clip: rec.get_i32(schema, "m_iClip"),
-            m_fl_next_primary_attack: rec.get_f32(schema, "m_flNextPrimaryAttack"),
-            m_fl_next_secondary_attack: rec.get_f32(schema, "m_flNextSecondaryAttack"),
-            m_fl_time_weapon_idle: rec.get_f32(schema, "m_flTimeWeaponIdle"),
-            m_f_in_reload: rec.get_i32(schema, "m_fInReload"),
-            m_f_in_special_reload: rec.get_i32(schema, "m_fInSpecialReload"),
-            m_fl_next_reload: rec.get_f32(schema, "m_flNextReload"),
-            m_fl_pump_time: rec.get_f32(schema, "m_flPumpTime"),
-            m_f_reload_time: rec.get_f32(schema, "m_fReloadTime"),
-            m_f_aimed_damage: rec.get_f32(schema, "m_fAimedDamage"),
-            m_f_next_aim_bonus: rec.get_f32(schema, "m_fNextAimBonus"),
-            m_f_in_zoom: rec.get_i32(schema, "m_fInZoom"),
-            m_i_weapon_state: rec.get_i32(schema, "m_iWeaponState"),
-            iuser1: rec.get_i32(schema, "iuser1"),
-            iuser2: rec.get_i32(schema, "iuser2"),
-            iuser3: rec.get_i32(schema, "iuser3"),
-            iuser4: rec.get_i32(schema, "iuser4"),
-            fuser1: rec.get_f32(schema, "fuser1"),
-            fuser2: rec.get_f32(schema, "fuser2"),
-            fuser3: rec.get_f32(schema, "fuser3"),
-            fuser4: rec.get_f32(schema, "fuser4"),
-        }
+        from_delta_via_plan(Self::default(), rec, schema)
     }
 }
 
@@ -1223,147 +2372,183 @@ pub struct GoldSrcEntityState {
     pub iuser4: i32,
 }
 
-/// The wire names of the indexed `entity_state_t` fields, so a state is not decoded through
-/// `format!`.
-const CONTROLLER_NAMES: [&str; 4] = ["controller[0]", "controller[1]", "controller[2]", "controller[3]"];
-const BLENDING_NAMES: [&str; 2] = ["blending[0]", "blending[1]"];
-const BASEVELOCITY_NAMES: [&str; 3] = ["basevelocity[0]", "basevelocity[1]", "basevelocity[2]"];
-const STARTPOS_NAMES: [&str; 3] = ["startpos[0]", "startpos[1]", "startpos[2]"];
-const ENDPOS_NAMES: [&str; 3] = ["endpos[0]", "endpos[1]", "endpos[2]"];
+impl DeltaStruct for GoldSrcEntityState {
+    type FieldId = EntityFieldId;
+
+    #[inline]
+    fn compiled_plan(schema: &DeltaSchema) -> &CompiledPlan<Self::FieldId> {
+        schema.entity_plan()
+    }
+
+    #[inline]
+    fn unknown_field_id() -> Self::FieldId {
+        EntityFieldId::Unknown
+    }
+
+    #[inline]
+    fn read_field(&self, id: Self::FieldId, base_type: u32, signed: bool) -> DeltaFieldRef<'_> {
+        match id {
+            EntityFieldId::AnimTime => DeltaFieldRef::Float(self.animtime),
+            EntityFieldId::Frame => DeltaFieldRef::Float(self.frame),
+            EntityFieldId::Origin0 => DeltaFieldRef::Float(self.origin.x),
+            EntityFieldId::Origin1 => DeltaFieldRef::Float(self.origin.y),
+            EntityFieldId::Origin2 => DeltaFieldRef::Float(self.origin.z),
+            EntityFieldId::Angles0 => DeltaFieldRef::Float(self.angles.x),
+            EntityFieldId::Angles1 => DeltaFieldRef::Float(self.angles.y),
+            EntityFieldId::Angles2 => DeltaFieldRef::Float(self.angles.z),
+            EntityFieldId::Sequence => DeltaFieldRef::uint_for(self.sequence as u32, signed),
+            EntityFieldId::GaitSequence => {
+                DeltaFieldRef::uint_for(self.gaitsequence as u32, signed)
+            }
+            EntityFieldId::ModelIndex => DeltaFieldRef::uint_for(self.modelindex as u32, signed),
+            EntityFieldId::MoveType => DeltaFieldRef::uint_for(self.movetype as u32, signed),
+            EntityFieldId::Solid => DeltaFieldRef::uint_for(self.solid as u32, signed),
+            EntityFieldId::Mins0 => DeltaFieldRef::Float(self.mins.x),
+            EntityFieldId::Mins1 => DeltaFieldRef::Float(self.mins.y),
+            EntityFieldId::Mins2 => DeltaFieldRef::Float(self.mins.z),
+            EntityFieldId::Maxs0 => DeltaFieldRef::Float(self.maxs.x),
+            EntityFieldId::Maxs1 => DeltaFieldRef::Float(self.maxs.y),
+            EntityFieldId::Maxs2 => DeltaFieldRef::Float(self.maxs.z),
+            EntityFieldId::WeaponModel => DeltaFieldRef::uint_for(self.weaponmodel as u32, signed),
+            EntityFieldId::Owner => DeltaFieldRef::uint_for(self.owner as u32, signed),
+            EntityFieldId::Effects => DeltaFieldRef::uint_for(self.effects, signed),
+            EntityFieldId::ColorMap => DeltaFieldRef::uint_for(self.colormap as u32, signed),
+            EntityFieldId::FrameRate => DeltaFieldRef::Float(self.framerate),
+            EntityFieldId::Skin => DeltaFieldRef::int_for(self.skin as i32, signed),
+            EntityFieldId::Body => DeltaFieldRef::uint_for(self.body as u32, signed),
+            EntityFieldId::RenderMode => DeltaFieldRef::uint_for(self.rendermode as u32, signed),
+            EntityFieldId::RenderAmt => DeltaFieldRef::uint_for(self.renderamt as u32, signed),
+            EntityFieldId::RenderFx => DeltaFieldRef::uint_for(self.renderfx as u32, signed),
+            EntityFieldId::Scale => DeltaFieldRef::Float(self.scale),
+            EntityFieldId::Aiment => DeltaFieldRef::uint_for(self.aiment as u32, signed),
+            EntityFieldId::UseHull => DeltaFieldRef::uint_for(self.usehull as u32, signed),
+            EntityFieldId::Spectator => DeltaFieldRef::uint_for(u32::from(self.spectator), signed),
+            EntityFieldId::EFlags => DeltaFieldRef::uint_for(u32::from(self.eflags), signed),
+            EntityFieldId::RenderColorR => {
+                DeltaFieldRef::uint_for(u32::from(self.rendercolor[0]), signed)
+            }
+            EntityFieldId::RenderColorG => {
+                DeltaFieldRef::uint_for(u32::from(self.rendercolor[1]), signed)
+            }
+            EntityFieldId::RenderColorB => {
+                DeltaFieldRef::uint_for(u32::from(self.rendercolor[2]), signed)
+            }
+            EntityFieldId::Controller0 => {
+                DeltaFieldRef::uint_for(u32::from(self.controller[0]), signed)
+            }
+            EntityFieldId::Controller1 => {
+                DeltaFieldRef::uint_for(u32::from(self.controller[1]), signed)
+            }
+            EntityFieldId::Controller2 => {
+                DeltaFieldRef::uint_for(u32::from(self.controller[2]), signed)
+            }
+            EntityFieldId::Controller3 => {
+                DeltaFieldRef::uint_for(u32::from(self.controller[3]), signed)
+            }
+            EntityFieldId::Blending0 => {
+                DeltaFieldRef::uint_for(u32::from(self.blending[0]), signed)
+            }
+            EntityFieldId::Blending1 => {
+                DeltaFieldRef::uint_for(u32::from(self.blending[1]), signed)
+            }
+            EntityFieldId::Friction => DeltaFieldRef::Float(self.friction),
+            EntityFieldId::Gravity => DeltaFieldRef::Float(self.gravity),
+            EntityFieldId::BaseVelocity0 => DeltaFieldRef::Float(self.basevelocity.x),
+            EntityFieldId::BaseVelocity1 => DeltaFieldRef::Float(self.basevelocity.y),
+            EntityFieldId::BaseVelocity2 => DeltaFieldRef::Float(self.basevelocity.z),
+            EntityFieldId::StartPos0 => DeltaFieldRef::Float(self.startpos.x),
+            EntityFieldId::StartPos1 => DeltaFieldRef::Float(self.startpos.y),
+            EntityFieldId::StartPos2 => DeltaFieldRef::Float(self.startpos.z),
+            EntityFieldId::EndPos0 => DeltaFieldRef::Float(self.endpos.x),
+            EntityFieldId::EndPos1 => DeltaFieldRef::Float(self.endpos.y),
+            EntityFieldId::EndPos2 => DeltaFieldRef::Float(self.endpos.z),
+            EntityFieldId::ImpactTime => DeltaFieldRef::Float(self.impacttime),
+            EntityFieldId::StartTime => DeltaFieldRef::Float(self.starttime),
+            EntityFieldId::IUser4 => DeltaFieldRef::int_for(self.iuser4, signed),
+            EntityFieldId::Unknown => DeltaFieldRef::zero_for(base_type, signed),
+        }
+    }
+
+    #[inline]
+    fn write_field(&mut self, id: Self::FieldId, val: DecodedField) {
+        match id {
+            EntityFieldId::AnimTime => self.animtime = val.as_f32(),
+            EntityFieldId::Frame => self.frame = val.as_f32(),
+            EntityFieldId::Origin0 => self.origin.x = val.as_f32(),
+            EntityFieldId::Origin1 => self.origin.y = val.as_f32(),
+            EntityFieldId::Origin2 => self.origin.z = val.as_f32(),
+            EntityFieldId::Angles0 => self.angles.x = val.as_f32(),
+            EntityFieldId::Angles1 => self.angles.y = val.as_f32(),
+            EntityFieldId::Angles2 => self.angles.z = val.as_f32(),
+            EntityFieldId::Sequence => self.sequence = val.as_u32() as u16,
+            EntityFieldId::GaitSequence => self.gaitsequence = val.as_u32() as u16,
+            EntityFieldId::ModelIndex => self.modelindex = val.as_u32() as u16,
+            EntityFieldId::MoveType => self.movetype = val.as_u32() as u8,
+            EntityFieldId::Solid => self.solid = val.as_u32() as u8,
+            EntityFieldId::Mins0 => self.mins.x = val.as_f32(),
+            EntityFieldId::Mins1 => self.mins.y = val.as_f32(),
+            EntityFieldId::Mins2 => self.mins.z = val.as_f32(),
+            EntityFieldId::Maxs0 => self.maxs.x = val.as_f32(),
+            EntityFieldId::Maxs1 => self.maxs.y = val.as_f32(),
+            EntityFieldId::Maxs2 => self.maxs.z = val.as_f32(),
+            EntityFieldId::WeaponModel => self.weaponmodel = val.as_u32() as u16,
+            EntityFieldId::Owner => self.owner = val.as_u32() as u16,
+            EntityFieldId::Effects => self.effects = val.as_u32(),
+            EntityFieldId::ColorMap => self.colormap = val.as_u32() as u16,
+            EntityFieldId::FrameRate => self.framerate = val.as_f32(),
+            EntityFieldId::Skin => self.skin = val.as_i32() as i16,
+            EntityFieldId::Body => self.body = val.as_u32() as u8,
+            EntityFieldId::RenderMode => self.rendermode = val.as_u32() as u8,
+            EntityFieldId::RenderAmt => self.renderamt = val.as_u32() as u8,
+            EntityFieldId::RenderFx => self.renderfx = val.as_u32() as u8,
+            EntityFieldId::Scale => self.scale = val.as_f32(),
+            EntityFieldId::Aiment => self.aiment = val.as_u32() as u16,
+            EntityFieldId::UseHull => self.usehull = val.as_u32() as u8,
+            EntityFieldId::Spectator => self.spectator = val.as_u32() != 0,
+            EntityFieldId::EFlags => self.eflags = val.as_u32() as u8,
+            EntityFieldId::RenderColorR => self.rendercolor[0] = val.as_u32() as u8,
+            EntityFieldId::RenderColorG => self.rendercolor[1] = val.as_u32() as u8,
+            EntityFieldId::RenderColorB => self.rendercolor[2] = val.as_u32() as u8,
+            EntityFieldId::Controller0 => self.controller[0] = val.as_u32() as u8,
+            EntityFieldId::Controller1 => self.controller[1] = val.as_u32() as u8,
+            EntityFieldId::Controller2 => self.controller[2] = val.as_u32() as u8,
+            EntityFieldId::Controller3 => self.controller[3] = val.as_u32() as u8,
+            EntityFieldId::Blending0 => self.blending[0] = val.as_u32() as u8,
+            EntityFieldId::Blending1 => self.blending[1] = val.as_u32() as u8,
+            EntityFieldId::Friction => self.friction = val.as_f32(),
+            EntityFieldId::Gravity => self.gravity = val.as_f32(),
+            EntityFieldId::BaseVelocity0 => self.basevelocity.x = val.as_f32(),
+            EntityFieldId::BaseVelocity1 => self.basevelocity.y = val.as_f32(),
+            EntityFieldId::BaseVelocity2 => self.basevelocity.z = val.as_f32(),
+            EntityFieldId::StartPos0 => self.startpos.x = val.as_f32(),
+            EntityFieldId::StartPos1 => self.startpos.y = val.as_f32(),
+            EntityFieldId::StartPos2 => self.startpos.z = val.as_f32(),
+            EntityFieldId::EndPos0 => self.endpos.x = val.as_f32(),
+            EntityFieldId::EndPos1 => self.endpos.y = val.as_f32(),
+            EntityFieldId::EndPos2 => self.endpos.z = val.as_f32(),
+            EntityFieldId::ImpactTime => self.impacttime = val.as_f32(),
+            EntityFieldId::StartTime => self.starttime = val.as_f32(),
+            EntityFieldId::IUser4 => self.iuser4 = val.as_i32(),
+            EntityFieldId::Unknown => {}
+        }
+    }
+}
 
 impl GoldSrcEntityState {
     pub fn to_delta(&self, schema: &DeltaSchema) -> DeltaRecord {
-        let mut rec = schema.zero_record();
-        rec.set_f32(schema, "animtime", self.animtime);
-        rec.set_f32(schema, "frame", self.frame);
-        rec.set_f32(schema, "origin[0]", self.origin.x);
-        rec.set_f32(schema, "origin[1]", self.origin.y);
-        rec.set_f32(schema, "origin[2]", self.origin.z);
-        rec.set_f32(schema, "angles[0]", self.angles.x);
-        rec.set_f32(schema, "angles[1]", self.angles.y);
-        rec.set_f32(schema, "angles[2]", self.angles.z);
-        rec.set_u32(schema, "sequence", self.sequence as u32);
-        rec.set_u32(schema, "gaitsequence", self.gaitsequence as u32);
-        rec.set_u32(schema, "modelindex", self.modelindex as u32);
-        rec.set_u32(schema, "movetype", self.movetype as u32);
-        rec.set_u32(schema, "solid", self.solid as u32);
-        rec.set_f32(schema, "mins[0]", self.mins.x);
-        rec.set_f32(schema, "mins[1]", self.mins.y);
-        rec.set_f32(schema, "mins[2]", self.mins.z);
-        rec.set_f32(schema, "maxs[0]", self.maxs.x);
-        rec.set_f32(schema, "maxs[1]", self.maxs.y);
-        rec.set_f32(schema, "maxs[2]", self.maxs.z);
-        rec.set_u32(schema, "weaponmodel", self.weaponmodel as u32);
-        rec.set_u32(schema, "owner", self.owner as u32);
-        rec.set_u32(schema, "effects", self.effects);
-        rec.set_u32(schema, "colormap", self.colormap as u32);
-        rec.set_f32(schema, "framerate", self.framerate);
-        rec.set_i32(schema, "skin", self.skin as i32);
-        rec.set_u32(schema, "body", self.body as u32);
-        rec.set_u32(schema, "rendermode", self.rendermode as u32);
-        rec.set_u32(schema, "renderamt", self.renderamt as u32);
-        rec.set_u32(schema, "renderfx", self.renderfx as u32);
-        rec.set_f32(schema, "scale", self.scale);
-        rec.set_u32(schema, "aiment", self.aiment as u32);
-        rec.set_u32(schema, "usehull", self.usehull as u32);
-        rec.set_u32(schema, "spectator", u32::from(self.spectator));
-        rec.set_u32(schema, "eflags", u32::from(self.eflags));
-        rec.set_u32(schema, "rendercolor.r", u32::from(self.rendercolor[0]));
-        rec.set_u32(schema, "rendercolor.g", u32::from(self.rendercolor[1]));
-        rec.set_u32(schema, "rendercolor.b", u32::from(self.rendercolor[2]));
-        for (name, c) in CONTROLLER_NAMES.iter().zip(&self.controller) {
-            rec.set_u32(schema, name, u32::from(*c));
-        }
-        for (name, b) in BLENDING_NAMES.iter().zip(&self.blending) {
-            rec.set_u32(schema, name, u32::from(*b));
-        }
-        rec.set_f32(schema, "friction", self.friction);
-        rec.set_f32(schema, "gravity", self.gravity);
-        for i in 0..3 {
-            rec.set_f32(schema, BASEVELOCITY_NAMES[i], self.basevelocity[i]);
-            rec.set_f32(schema, STARTPOS_NAMES[i], self.startpos[i]);
-            rec.set_f32(schema, ENDPOS_NAMES[i], self.endpos[i]);
-        }
-        rec.set_f32(schema, "impacttime", self.impacttime);
-        rec.set_f32(schema, "starttime", self.starttime);
-        rec.set_i32(schema, "iuser4", self.iuser4);
-        rec
+        to_delta_via_plan(self, schema)
     }
 
     pub fn from_delta(number: u16, entity_type: u8, rec: &DeltaRecord, schema: &DeltaSchema) -> Self {
-        Self {
-            number,
-            entity_type,
-            origin: Vec3::new(
-                rec.get_f32(schema, "origin[0]"),
-                rec.get_f32(schema, "origin[1]"),
-                rec.get_f32(schema, "origin[2]"),
-            ),
-            angles: Vec3::new(
-                rec.get_f32(schema, "angles[0]"),
-                rec.get_f32(schema, "angles[1]"),
-                rec.get_f32(schema, "angles[2]"),
-            ),
-            modelindex: rec.get_u32(schema, "modelindex") as u16,
-            sequence: rec.get_u32(schema, "sequence") as u16,
-            gaitsequence: rec.get_u32(schema, "gaitsequence") as u16,
-            frame: rec.get_f32(schema, "frame"),
-            animtime: rec.get_f32(schema, "animtime"),
-            framerate: rec.get_f32(schema, "framerate"),
-            weaponmodel: rec.get_u32(schema, "weaponmodel") as u16,
-            movetype: rec.get_u32(schema, "movetype") as u8,
-            solid: rec.get_u32(schema, "solid") as u8,
-            effects: rec.get_u32(schema, "effects"),
-            rendermode: rec.get_u32(schema, "rendermode") as u8,
-            renderamt: rec.get_u32(schema, "renderamt") as u8,
-            renderfx: rec.get_u32(schema, "renderfx") as u8,
-            skin: rec.get_i32(schema, "skin") as i16,
-            body: rec.get_u32(schema, "body") as u8,
-            scale: rec.get_f32(schema, "scale"),
-            owner: rec.get_u32(schema, "owner") as u16,
-            aiment: rec.get_u32(schema, "aiment") as u16,
-            usehull: rec.get_u32(schema, "usehull") as u8,
-            spectator: rec.get_u32(schema, "spectator") != 0,
-            mins: Vec3::new(
-                rec.get_f32(schema, "mins[0]"),
-                rec.get_f32(schema, "mins[1]"),
-                rec.get_f32(schema, "mins[2]"),
-            ),
-            maxs: Vec3::new(
-                rec.get_f32(schema, "maxs[0]"),
-                rec.get_f32(schema, "maxs[1]"),
-                rec.get_f32(schema, "maxs[2]"),
-            ),
-            colormap: rec.get_u32(schema, "colormap") as u16,
-            eflags: rec.get_u32(schema, "eflags") as u8,
-            rendercolor: [
-                rec.get_u32(schema, "rendercolor.r") as u8,
-                rec.get_u32(schema, "rendercolor.g") as u8,
-                rec.get_u32(schema, "rendercolor.b") as u8,
-            ],
-            controller: std::array::from_fn(|i| rec.get_u32(schema, CONTROLLER_NAMES[i]) as u8),
-            blending: std::array::from_fn(|i| rec.get_u32(schema, BLENDING_NAMES[i]) as u8),
-            friction: rec.get_f32(schema, "friction"),
-            gravity: rec.get_f32(schema, "gravity"),
-            basevelocity: Vec3::new(
-                rec.get_f32(schema, "basevelocity[0]"),
-                rec.get_f32(schema, "basevelocity[1]"),
-                rec.get_f32(schema, "basevelocity[2]"),
-            ),
-            startpos: Vec3::new(
-                rec.get_f32(schema, "startpos[0]"),
-                rec.get_f32(schema, "startpos[1]"),
-                rec.get_f32(schema, "startpos[2]"),
-            ),
-            endpos: Vec3::new(
-                rec.get_f32(schema, "endpos[0]"),
-                rec.get_f32(schema, "endpos[1]"),
-                rec.get_f32(schema, "endpos[2]"),
-            ),
-            impacttime: rec.get_f32(schema, "impacttime"),
-            starttime: rec.get_f32(schema, "starttime"),
-            iuser4: rec.get_i32(schema, "iuser4"),
-        }
+        from_delta_via_plan(
+            Self {
+                number,
+                entity_type,
+                ..Self::default()
+            },
+            rec,
+            schema,
+        )
     }
 }
 
@@ -1935,5 +3120,597 @@ mod tests {
 }
 ";
         assert!(parse_delta_lst(bad_struct).is_err());
+    }
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 32) as u32
+        }
+        fn f32_range(&mut self, lo: f32, hi: f32) -> f32 {
+            let t = (self.next_u32() as f32) / (u32::MAX as f32);
+            lo + (hi - lo) * t
+        }
+        fn i32_range(&mut self, lo: i32, hi: i32) -> i32 {
+            let span = (hi - lo + 1) as u32;
+            lo + (self.next_u32() % span) as i32
+        }
+    }
+
+    fn random_entity(rng: &mut Lcg, number: u16, entity_type: u8) -> GoldSrcEntityState {
+        GoldSrcEntityState {
+            number,
+            entity_type,
+            origin: Vec3::new(
+                rng.f32_range(-2000.0, 2000.0),
+                rng.f32_range(-2000.0, 2000.0),
+                rng.f32_range(-512.0, 512.0),
+            ),
+            angles: Vec3::new(
+                rng.f32_range(-89.0, 89.0),
+                rng.f32_range(0.0, 360.0),
+                rng.f32_range(-45.0, 45.0),
+            ),
+            modelindex: (rng.next_u32() % 512) as u16,
+            sequence: (rng.next_u32() % 180) as u16,
+            gaitsequence: (rng.next_u32() % 64) as u16,
+            frame: rng.f32_range(0.0, 255.0),
+            animtime: rng.f32_range(10.0, 12.0),
+            framerate: rng.f32_range(-4.0, 4.0),
+            weaponmodel: (rng.next_u32() % 512) as u16,
+            movetype: (rng.next_u32() % 14) as u8,
+            solid: (rng.next_u32() % 6) as u8,
+            effects: rng.next_u32() & 0xFF,
+            rendermode: (rng.next_u32() % 64) as u8,
+            renderamt: (rng.next_u32() & 0xFF) as u8,
+            renderfx: (rng.next_u32() % 32) as u8,
+            skin: rng.i32_range(-16, 16) as i16,
+            body: (rng.next_u32() & 0xFF) as u8,
+            scale: rng.f32_range(0.0, 10.0),
+            owner: (rng.next_u32() % 32) as u16,
+            aiment: (rng.next_u32() % 1024) as u16,
+            usehull: (rng.next_u32() & 1) as u8,
+            spectator: (rng.next_u32() & 1) != 0,
+            mins: Vec3::new(-16.0, -16.0, -36.0),
+            maxs: Vec3::new(16.0, 16.0, 36.0),
+            colormap: (rng.next_u32() & 0xFFFF) as u16,
+            eflags: (rng.next_u32() & 3) as u8,
+            rendercolor: [
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+            ],
+            controller: [
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+            ],
+            blending: [rng.next_u32() as u8, rng.next_u32() as u8],
+            friction: rng.f32_range(0.0, 4.0),
+            gravity: rng.f32_range(-2.0, 2.0),
+            basevelocity: Vec3::new(
+                rng.f32_range(-128.0, 128.0),
+                rng.f32_range(-128.0, 128.0),
+                rng.f32_range(-64.0, 64.0),
+            ),
+            startpos: Vec3::new(
+                rng.f32_range(-512.0, 512.0),
+                rng.f32_range(-512.0, 512.0),
+                rng.f32_range(-512.0, 512.0),
+            ),
+            endpos: Vec3::new(
+                rng.f32_range(-512.0, 512.0),
+                rng.f32_range(-512.0, 512.0),
+                rng.f32_range(-512.0, 512.0),
+            ),
+            impacttime: rng.f32_range(10.0, 14.0),
+            starttime: rng.f32_range(9.0, 13.0),
+            iuser4: rng.i32_range(0, 3),
+        }
+    }
+
+    fn random_clientdata(rng: &mut Lcg) -> GoldSrcClientData {
+        let phys = match rng.next_u32() % 3 {
+            0 => String::new(),
+            1 => "\\slj\\1".to_string(),
+            _ => "\\s\\0\\v\\250".to_string(),
+        };
+        GoldSrcClientData {
+            origin: Vec3::new(
+                rng.f32_range(-4000.0, 4000.0),
+                rng.f32_range(-4000.0, 4000.0),
+                rng.f32_range(-512.0, 512.0),
+            ),
+            velocity: Vec3::new(
+                rng.f32_range(-500.0, 500.0),
+                rng.f32_range(-500.0, 500.0),
+                rng.f32_range(-300.0, 300.0),
+            ),
+            viewmodel: rng.i32_range(0, 511),
+            punchangle: Vec3::new(
+                rng.f32_range(-4.0, 4.0),
+                rng.f32_range(-4.0, 4.0),
+                rng.f32_range(-4.0, 4.0),
+            ),
+            flags: rng.next_u32(),
+            waterlevel: rng.i32_range(0, 3),
+            view_ofs: Vec3::new(0.0, 0.0, rng.f32_range(12.0, 28.0)),
+            health: rng.f32_range(-10.0, 100.0),
+            b_in_duck: rng.i32_range(0, 1),
+            weapons: rng.next_u32(),
+            ammo_nails: rng.i32_range(-50, 200),
+            ammo_shells: rng.i32_range(-50, 200),
+            ammo_cells: rng.i32_range(-50, 200),
+            ammo_rockets: rng.i32_range(-50, 200),
+            fl_time_step_sound: rng.i32_range(0, 900),
+            fl_duck_time: rng.i32_range(0, 1000),
+            maxspeed: rng.f32_range(100.0, 320.0),
+            m_i_id: rng.i32_range(0, 31),
+            m_fl_next_attack: rng.f32_range(-1.0, 2.0),
+            fov: rng.f32_range(10.0, 120.0),
+            weaponanim: rng.i32_range(0, 255),
+            deadflag: rng.i32_range(0, 4),
+            iuser1: rng.i32_range(0, 6),
+            iuser2: rng.i32_range(0, 32),
+            iuser3: rng.i32_range(0, 255),
+            iuser4: rng.i32_range(0, 3),
+            physinfo: phys,
+            fl_swim_time: rng.i32_range(0, 1000),
+            waterjumptime: rng.i32_range(0, 20000),
+            pushmsec: rng.i32_range(0, 1500),
+            fuser1: rng.f32_range(0.0, 255.0),
+            fuser2: rng.f32_range(0.0, 4000.0),
+            fuser3: rng.f32_range(0.0, 500.0),
+            vuser2: Vec3::new(
+                rng.f32_range(0.0, 200.0),
+                rng.f32_range(0.0, 200.0),
+                rng.f32_range(0.0, 200.0),
+            ),
+            vuser3: Vec3::new(
+                rng.f32_range(0.0, 200.0),
+                rng.f32_range(0.0, 200.0),
+                rng.f32_range(0.0, 200.0),
+            ),
+            vuser4: Vec3::new(rng.f32_range(0.0, 200.0), rng.f32_range(0.0, 200.0), 0.0),
+        }
+    }
+
+    fn random_weapondata(rng: &mut Lcg) -> GoldSrcWeaponData {
+        GoldSrcWeaponData {
+            m_i_id: rng.i32_range(0, 31),
+            m_i_clip: rng.i32_range(-1, 100),
+            m_fl_next_primary_attack: rng.f32_range(-1.0, 2.0),
+            m_fl_next_secondary_attack: rng.f32_range(-1.0, 2.0),
+            m_fl_time_weapon_idle: rng.f32_range(-1.0, 5.0),
+            m_f_in_reload: rng.i32_range(0, 1),
+            m_f_in_special_reload: rng.i32_range(0, 2),
+            m_fl_next_reload: rng.f32_range(-1.0, 3.0),
+            m_fl_pump_time: rng.f32_range(-1.0, 2.0),
+            m_f_reload_time: rng.f32_range(0.0, 4.0),
+            m_f_aimed_damage: rng.f32_range(0.0, 100.0),
+            m_f_next_aim_bonus: rng.f32_range(-1.0, 2.0),
+            m_f_in_zoom: rng.i32_range(0, 90),
+            m_i_weapon_state: rng.i32_range(0, 64),
+            iuser1: rng.i32_range(-100, 100),
+            iuser2: 0,
+            iuser3: 0,
+            iuser4: 0,
+            fuser1: rng.f32_range(-10.0, 10.0),
+            fuser2: rng.f32_range(-100.0, 100.0),
+            fuser3: rng.f32_range(-100.0, 100.0),
+            fuser4: 0.0,
+        }
+    }
+
+    fn random_usercmd(rng: &mut Lcg) -> GoldSrcUserCmd {
+        GoldSrcUserCmd {
+            lerp_msec: rng.i32_range(0, 100) as i16,
+            msec: (rng.next_u32() % 50) as u8,
+            viewangles: Vec3::new(
+                rng.f32_range(-89.0, 89.0),
+                rng.f32_range(0.0, 360.0),
+                rng.f32_range(-20.0, 20.0),
+            ),
+            forwardmove: rng.f32_range(-400.0, 400.0),
+            sidemove: rng.f32_range(-400.0, 400.0),
+            upmove: rng.f32_range(-400.0, 400.0),
+            lightlevel: (rng.next_u32() & 0xFF) as u8,
+            buttons: (rng.next_u32() & 0xFFFF) as u16,
+            impulse: (rng.next_u32() & 0xFF) as u8,
+            weaponselect: (rng.next_u32() % 32) as u8,
+            impact_index: rng.i32_range(0, 63),
+            impact_position: Vec3::new(
+                rng.f32_range(-1024.0, 1024.0),
+                rng.f32_range(-1024.0, 1024.0),
+                rng.f32_range(-512.0, 512.0),
+            ),
+        }
+    }
+
+    /// Proves 100% bit-for-bit wire equivalence between zero-alloc `write_struct_delta` /
+    /// `read_struct_delta` and legacy `to_delta() + write_delta()` / `read_delta() + from_delta()`
+    /// across all 6 CS 1.6 schemas (`entity_state_t`, `entity_state_player_t`,
+    /// `custom_entity_state_t`, `clientdata_t`, `weapon_data_t`, `usercmd_t`).
+    #[test]
+    fn compiled_plan_struct_delta_is_bit_identical_across_all_six_schemas() {
+        let reg = DeltaRegistry::cs16_default();
+        let mut rng = Lcg(0xC516_CAFE_BABE_1021);
+        let time_base = 12.34f64;
+
+        // 1-3: Entity schemas (`entity_state_t`, `entity_state_player_t`, `custom_entity_state_t`).
+        for (schema_name, ent_type) in [
+            ("entity_state_t", 1u8),
+            ("entity_state_player_t", 1u8),
+            ("custom_entity_state_t", 2u8),
+        ] {
+            let schema = reg.get(schema_name).unwrap();
+            let mut prev_state = GoldSrcEntityState {
+                number: 7,
+                entity_type: ent_type,
+                ..Default::default()
+            };
+            let mut prev_rec = prev_state.to_delta(schema);
+
+            for iter in 0..32usize {
+                let to_state = if iter % 5 == 0 {
+                    prev_state.clone()
+                } else {
+                    random_entity(&mut rng, 7, ent_type)
+                };
+                let to_rec = to_state.to_delta(schema);
+                let force = iter % 2 == 0;
+
+                // Unencoded bit-for-bit check.
+                let mut w_legacy = MsgWriter::new();
+                w_legacy.start_bit_writing();
+                let changed_legacy =
+                    write_delta(&mut w_legacy, schema, &prev_rec, &to_rec, force, time_base);
+                w_legacy.end_bit_writing();
+
+                let mut w_fast = MsgWriter::new();
+                w_fast.start_bit_writing();
+                let changed_fast = write_struct_delta(
+                    &mut w_fast,
+                    schema,
+                    &prev_state,
+                    &to_state,
+                    force,
+                    time_base,
+                );
+                w_fast.end_bit_writing();
+
+                assert_eq!(changed_fast, changed_legacy, "{schema_name} iter {iter}");
+                assert_eq!(
+                    w_fast.as_slice(),
+                    w_legacy.as_slice(),
+                    "{schema_name} wire mismatch iter {iter}"
+                );
+
+                // Hybrid struct-vs-record bit-for-bit check.
+                let mut w_hybrid = MsgWriter::new();
+                w_hybrid.start_bit_writing();
+                let changed_hybrid = write_struct_delta_from_record(
+                    &mut w_hybrid,
+                    schema,
+                    &prev_rec,
+                    &to_state,
+                    force,
+                    time_base,
+                );
+                w_hybrid.end_bit_writing();
+                assert_eq!(changed_hybrid, changed_legacy, "{schema_name} hybrid iter {iter}");
+                assert_eq!(w_hybrid.as_slice(), w_legacy.as_slice(), "{schema_name} hybrid wire");
+
+                // Conditional encoder check using stack DeltaMarks bitmask helpers.
+                let mut w_enc_legacy = MsgWriter::new();
+                w_enc_legacy.start_bit_writing();
+                let mut enc_l = |_: &DeltaRecord, _: &DeltaRecord, marks: &mut DeltaMarks<'_>| {
+                    marks.unset_mask(marks.entity_origin_mask());
+                    if iter % 3 == 0 {
+                        marks.set_mask(marks.entity_angles_mask());
+                    }
+                };
+                let c_el = write_delta_encoded(
+                    &mut w_enc_legacy,
+                    schema,
+                    &prev_rec,
+                    &to_rec,
+                    force,
+                    time_base,
+                    Some(&mut enc_l),
+                );
+                w_enc_legacy.end_bit_writing();
+
+                let mut w_enc_fast = MsgWriter::new();
+                w_enc_fast.start_bit_writing();
+                let mut enc_f = |_: &GoldSrcEntityState,
+                                 _: &GoldSrcEntityState,
+                                 marks: &mut DeltaMarks<'_>| {
+                    marks.unset_mask(marks.entity_origin_mask());
+                    if iter % 3 == 0 {
+                        marks.set_mask(marks.entity_angles_mask());
+                    }
+                };
+                let c_ef = write_struct_delta_encoded(
+                    &mut w_enc_fast,
+                    schema,
+                    &prev_state,
+                    &to_state,
+                    force,
+                    time_base,
+                    Some(&mut enc_f),
+                );
+                w_enc_fast.end_bit_writing();
+                assert_eq!(c_ef, c_el, "{schema_name} encoded changed iter {iter}");
+                assert_eq!(w_enc_fast.as_slice(), w_enc_legacy.as_slice());
+
+                // Decode equivalence when bytes were emitted.
+                if changed_legacy || force {
+                    let mut r_legacy = MsgReader::new(w_legacy.as_slice());
+                    r_legacy.start_bit_reading();
+                    let dec_rec = read_delta(&mut r_legacy, schema, &prev_rec, time_base).unwrap();
+                    r_legacy.end_bit_reading().unwrap();
+                    let dec_legacy =
+                        GoldSrcEntityState::from_delta(7, ent_type, &dec_rec, schema);
+
+                    let mut r_fast = MsgReader::new(w_fast.as_slice());
+                    r_fast.start_bit_reading();
+                    let dec_fast =
+                        read_struct_delta(&mut r_fast, schema, &prev_state, time_base).unwrap();
+                    r_fast.end_bit_reading().unwrap();
+
+                    assert_eq!(dec_fast, dec_legacy, "{schema_name} decode mismatch iter {iter}");
+                    // Also verify hybrid `write_struct_delta_from_record` against raw decoded
+                    // `DeltaRecord` (`dec_rec`) directly.
+                    let mut w_rec_l = MsgWriter::new();
+                    w_rec_l.start_bit_writing();
+                    let cl_dec = write_delta(&mut w_rec_l, schema, &dec_rec, &to_rec, force, time_base);
+                    w_rec_l.end_bit_writing();
+                    let mut w_rec_f = MsgWriter::new();
+                    w_rec_f.start_bit_writing();
+                    let cf_dec = write_struct_delta_from_record(
+                        &mut w_rec_f,
+                        schema,
+                        &dec_rec,
+                        &to_state,
+                        force,
+                        time_base,
+                    );
+                    w_rec_f.end_bit_writing();
+                    assert_eq!(cf_dec, cl_dec, "{schema_name} dec_rec hybrid iter {iter}");
+                    assert_eq!(w_rec_f.as_slice(), w_rec_l.as_slice());
+
+                    prev_state = dec_fast;
+                    prev_rec = prev_state.to_delta(schema);
+                }
+            }
+        }
+
+        // 4: `clientdata_t`.
+        {
+            let schema = reg.get("clientdata_t").unwrap();
+            let mut prev_state = GoldSrcClientData::default();
+            let mut prev_rec = prev_state.to_delta(schema);
+            for iter in 0..32usize {
+                let to_state = if iter % 5 == 0 {
+                    prev_state.clone()
+                } else {
+                    random_clientdata(&mut rng)
+                };
+                let to_rec = to_state.to_delta(schema);
+                let force = iter % 2 == 0;
+
+                let mut w_legacy = MsgWriter::new();
+                w_legacy.start_bit_writing();
+                let c_l = write_delta(&mut w_legacy, schema, &prev_rec, &to_rec, force, time_base);
+                w_legacy.end_bit_writing();
+
+                let mut w_fast = MsgWriter::new();
+                w_fast.start_bit_writing();
+                let c_f =
+                    write_struct_delta(&mut w_fast, schema, &prev_state, &to_state, force, time_base);
+                w_fast.end_bit_writing();
+
+                assert_eq!(c_f, c_l, "clientdata_t iter {iter}");
+                assert_eq!(w_fast.as_slice(), w_legacy.as_slice(), "clientdata_t wire iter {iter}");
+
+                if c_l || force {
+                    let mut r_l = MsgReader::new(w_legacy.as_slice());
+                    r_l.start_bit_reading();
+                    let dec_rec = read_delta(&mut r_l, schema, &prev_rec, time_base).unwrap();
+                    r_l.end_bit_reading().unwrap();
+                    let dec_l = GoldSrcClientData::from_delta(&dec_rec, schema);
+
+                    let mut r_f = MsgReader::new(w_fast.as_slice());
+                    r_f.start_bit_reading();
+                    let dec_f = read_struct_delta(&mut r_f, schema, &prev_state, time_base).unwrap();
+                    r_f.end_bit_reading().unwrap();
+
+                    assert_eq!(dec_f, dec_l, "clientdata_t decode iter {iter}");
+                    prev_state = dec_f;
+                    prev_rec = dec_rec;
+                }
+            }
+        }
+
+        // 5: `weapon_data_t`.
+        {
+            let schema = reg.get("weapon_data_t").unwrap();
+            let mut prev_state = GoldSrcWeaponData::default();
+            let mut prev_rec = prev_state.to_delta(schema);
+            for iter in 0..32usize {
+                let to_state = if iter % 5 == 0 {
+                    prev_state
+                } else {
+                    random_weapondata(&mut rng)
+                };
+                let to_rec = to_state.to_delta(schema);
+                let force = iter % 2 == 0;
+
+                let mut w_legacy = MsgWriter::new();
+                w_legacy.start_bit_writing();
+                let c_l = write_delta(&mut w_legacy, schema, &prev_rec, &to_rec, force, time_base);
+                w_legacy.end_bit_writing();
+
+                let mut w_fast = MsgWriter::new();
+                w_fast.start_bit_writing();
+                let c_f =
+                    write_struct_delta(&mut w_fast, schema, &prev_state, &to_state, force, time_base);
+                w_fast.end_bit_writing();
+
+                assert_eq!(c_f, c_l, "weapon_data_t iter {iter}");
+                assert_eq!(w_fast.as_slice(), w_legacy.as_slice(), "weapon_data_t wire iter {iter}");
+
+                if c_l || force {
+                    let mut r_l = MsgReader::new(w_legacy.as_slice());
+                    r_l.start_bit_reading();
+                    let dec_rec = read_delta(&mut r_l, schema, &prev_rec, time_base).unwrap();
+                    r_l.end_bit_reading().unwrap();
+                    let dec_l = GoldSrcWeaponData::from_delta(&dec_rec, schema);
+
+                    let mut r_f = MsgReader::new(w_fast.as_slice());
+                    r_f.start_bit_reading();
+                    let dec_f = read_struct_delta(&mut r_f, schema, &prev_state, time_base).unwrap();
+                    r_f.end_bit_reading().unwrap();
+
+                    assert_eq!(dec_f, dec_l, "weapon_data_t decode iter {iter}");
+                    prev_state = dec_f;
+                    prev_rec = dec_rec;
+                }
+            }
+        }
+
+        // 6: `usercmd_t`.
+        {
+            let schema = reg.get("usercmd_t").unwrap();
+            let mut prev_state = GoldSrcUserCmd::default();
+            let mut prev_rec = prev_state.to_delta(schema);
+            for iter in 0..32usize {
+                let to_state = if iter % 5 == 0 {
+                    prev_state.clone()
+                } else {
+                    random_usercmd(&mut rng)
+                };
+                let to_rec = to_state.to_delta(schema);
+                let force = iter % 2 == 0;
+
+                let mut w_legacy = MsgWriter::new();
+                w_legacy.start_bit_writing();
+                let c_l = write_delta(&mut w_legacy, schema, &prev_rec, &to_rec, force, 0.0);
+                w_legacy.end_bit_writing();
+
+                let mut w_fast = MsgWriter::new();
+                w_fast.start_bit_writing();
+                let c_f =
+                    write_struct_delta(&mut w_fast, schema, &prev_state, &to_state, force, 0.0);
+                w_fast.end_bit_writing();
+
+                assert_eq!(c_f, c_l, "usercmd_t iter {iter}");
+                assert_eq!(w_fast.as_slice(), w_legacy.as_slice(), "usercmd_t wire iter {iter}");
+
+                if c_l || force {
+                    let mut r_l = MsgReader::new(w_legacy.as_slice());
+                    r_l.start_bit_reading();
+                    let dec_rec = read_delta(&mut r_l, schema, &prev_rec, 0.0).unwrap();
+                    r_l.end_bit_reading().unwrap();
+                    let dec_l = GoldSrcUserCmd::from_delta(&dec_rec, schema);
+
+                    let mut r_f = MsgReader::new(w_fast.as_slice());
+                    r_f.start_bit_reading();
+                    let dec_f = read_struct_delta(&mut r_f, schema, &prev_state, 0.0).unwrap();
+                    r_f.end_bit_reading().unwrap();
+
+                    assert_eq!(dec_f, dec_l, "usercmd_t decode iter {iter}");
+                    prev_state = dec_f;
+                    prev_rec = dec_rec;
+                }
+            }
+        }
+    }
+
+    /// Unknown custom mod fields and duplicate field names in a schema degrade gracefully to zero
+    /// and match `DeltaRecord` wire output bit-for-bit.
+    #[test]
+    fn compiled_plan_handles_unknown_and_duplicate_fields() {
+        let custom = DeltaSchema::new(
+            "custom_mod_entity".to_string(),
+            None,
+            vec![
+                DeltaFieldDesc {
+                    field_type: DT_SIGNED | DT_FLOAT,
+                    name: "origin[0]".to_string(),
+                    field_offset: 0,
+                    field_size: 1,
+                    significant_bits: 16,
+                    premultiply: 8.0,
+                    postmultiply: 1.0,
+                },
+                DeltaFieldDesc {
+                    field_type: DT_STRING,
+                    name: "mod_custom_tag".to_string(),
+                    field_offset: 4,
+                    field_size: 1,
+                    significant_bits: 1,
+                    premultiply: 1.0,
+                    postmultiply: 1.0,
+                },
+                DeltaFieldDesc {
+                    field_type: DT_SIGNED | DT_FLOAT,
+                    name: "origin[0]".to_string(),
+                    field_offset: 8,
+                    field_size: 1,
+                    significant_bits: 16,
+                    premultiply: 8.0,
+                    postmultiply: 1.0,
+                },
+                DeltaFieldDesc {
+                    field_type: DT_INTEGER,
+                    name: "modelindex".to_string(),
+                    field_offset: 12,
+                    field_size: 1,
+                    significant_bits: 10,
+                    premultiply: 1.0,
+                    postmultiply: 1.0,
+                },
+            ],
+        );
+
+        let from = GoldSrcEntityState::default();
+        let to = GoldSrcEntityState {
+            origin: Vec3::new(128.5, 0.0, 0.0),
+            modelindex: 77,
+            ..Default::default()
+        };
+        let from_rec = from.to_delta(&custom);
+        let to_rec = to.to_delta(&custom);
+
+        let mut w_l = MsgWriter::new();
+        w_l.start_bit_writing();
+        assert!(write_delta(&mut w_l, &custom, &from_rec, &to_rec, false, 0.0));
+        w_l.end_bit_writing();
+
+        let mut w_f = MsgWriter::new();
+        w_f.start_bit_writing();
+        assert!(write_struct_delta(&mut w_f, &custom, &from, &to, false, 0.0));
+        w_f.end_bit_writing();
+
+        assert_eq!(w_f.as_slice(), w_l.as_slice());
+
+        // Also ensure unknown string field on the wire is skipped cleanly by `read_struct_delta`.
+        let mut rec_with_tag = to_rec.clone();
+        rec_with_tag.set_str(&custom, "mod_custom_tag", "hello_mod");
+        let mut w_tag = MsgWriter::new();
+        w_tag.start_bit_writing();
+        assert!(write_delta(&mut w_tag, &custom, &from_rec, &rec_with_tag, false, 0.0));
+        w_tag.end_bit_writing();
+
+        let mut r = MsgReader::new(w_tag.as_slice());
+        r.start_bit_reading();
+        let decoded = read_struct_delta(&mut r, &custom, &from, 0.0).unwrap();
+        r.end_bit_reading().unwrap();
+        assert!((decoded.origin.x - 128.5).abs() < 0.2);
+        assert_eq!(decoded.modelindex, 77);
     }
 }
