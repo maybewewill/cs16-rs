@@ -3,7 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Counter-Strike 1.6 — Web Admin Panel</title>
+  <title>cs16-rs — Web Admin Panel</title>
+  <link rel="icon" href="./favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <meta property="og:title" content="cs16-rs — Server Admin & ResMon Studio">
+  <meta property="og:description" content="Manage cs16-rs dedicated servers, live 2D HLTV-style round replays, RCON, and polyglot plugins in real time.">
+  <meta property="og:image" content="./icons/icon-512.png">
   <style>
     :root {
       --bg: #1d211a;
@@ -45,6 +51,13 @@
       display: flex;
       align-items: center;
       gap: 10px;
+    }
+    .brand-logo {
+      width: 28px;
+      height: 28px;
+      display: block;
+      border: 1px solid var(--border);
+      background: var(--inset);
     }
     .brand h1 {
       font-size: 15px;
@@ -405,12 +418,13 @@
 <body>
   <header>
     <div class="brand">
+      <img class="brand-logo" src="./icons/icon-192.png" alt="cs16-rs" width="28" height="28">
       <h1>CS 1.6 RUST — SERVER ADMIN PANEL</h1>
       <span id="auth-badge" class="badge">Locked</span>
       <span id="refresh-badge" class="badge">Idle</span>
     </div>
     <div class="row">
-      <a class="nav-link" href="/">Open Web Client</a>
+      <a class="nav-link" href="./index.html">Open Web Client</a>
     </div>
   </header>
 

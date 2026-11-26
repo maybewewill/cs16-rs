@@ -1379,7 +1379,7 @@ fn draw_cs16_hud_impl(
                     2 => Rect::from_center_size(Pos2::new(cx, cy + r), Vec2::new(span * 2.0, thick)),
                     _ => Rect::from_center_size(Pos2::new(cx - r, cy), Vec2::new(thick, span * 2.0)),
                 };
-                painter.rect_filled(rect, 2.0, col);
+                painter.rect_filled(rect, 0.0, col);
             }
         }
     }
@@ -2934,7 +2934,7 @@ pub fn draw_voice_speakers(
     ));
     let mut labels: Vec<(String, Color32)> = Vec::new();
     if local_talking {
-        labels.push(("MIC ACTIVE".to_string(), Color32::from_rgb(120, 240, 120)));
+        labels.push(("[MIC] SPEAKING".to_string(), Color32::from_rgb(255, 180, 30)));
     }
     for &slot in speakers {
         let label = names
@@ -2944,17 +2944,25 @@ pub fn draw_voice_speakers(
         labels.push((format!("[VOICE] {label}"), HUD_AMBER));
     }
     let font = FontId::proportional(13.0);
-    let mut y = screen.bottom() - 120.0;
+    let border = Color32::from_rgba_unmultiplied(188, 112, 0, 128);
+    let bg = Color32::from_rgba_unmultiplied(0, 0, 0, 165);
+    let shadow = Color32::from_black_alpha(220);
+    let mut y = (screen.bottom() - 120.0).floor();
     for (text, color) in labels.into_iter().rev().take(6) {
-        let rect = Rect::from_min_size(Pos2::new(screen.right() - 190.0, y - 22.0), Vec2::new(176.0, 20.0));
-        painter.rect_filled(rect, 3.0, Color32::from_rgba_unmultiplied(12, 16, 12, 185));
-        painter.text(
-            Pos2::new(rect.left() + 8.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            text,
-            font.clone(),
-            color,
+        let rect = Rect::from_min_size(
+            Pos2::new((screen.right() - 190.0).floor(), (y - 22.0).floor()),
+            Vec2::new(176.0, 20.0),
         );
+        painter.rect(
+            rect,
+            egui::CornerRadius::ZERO,
+            bg,
+            Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
+        let pos = Pos2::new(rect.left() + 8.0, rect.center().y.floor());
+        painter.text(pos + Vec2::new(1.0, 1.0), egui::Align2::LEFT_CENTER, &text, font.clone(), shadow);
+        painter.text(pos, egui::Align2::LEFT_CENTER, text, font.clone(), color);
         y -= 24.0;
     }
 }

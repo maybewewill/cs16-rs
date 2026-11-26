@@ -3,7 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Counter-Strike 1.6 (Rust Web)</title>
+  <title>cs16-rs — Counter-Strike 1.6 (Rust Web)</title>
+  <link rel="icon" href="./favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <meta property="og:title" content="cs16-rs — Counter-Strike 1.6 in Safe Rust (WebGPU/WASM)">
+  <meta property="og:description" content="Play Counter-Strike 1.6 directly in your browser via WebAssembly + WebGPU/WebGL2 with offline ZBots, 1-click WebRTC P2P rooms, and Protocol 48 multiplayer.">
+  <meta property="og:image" content="./icons/icon-512.png">
   <link rel="manifest" href="./manifest.webmanifest">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -11,7 +17,10 @@
     #cs16-canvas { width: 100%; height: 100%; display: block; touch-action: none; }
     #topbar {
       position: fixed; top: 8px; left: 8px; z-index: 20; display: flex; gap: 6px; align-items: center;
-      background: rgba(76, 88, 68, 0.92); border: 1px solid #889180; padding: 4px 8px; font-size: 12px;
+      background: rgba(76, 88, 68, 0.94); border: 1px solid #889180; padding: 4px 8px; font-size: 12px;
+    }
+    .brand-logo {
+      width: 24px; height: 24px; display: block; border: 1px solid #889180; background: #2c3327;
     }
     #control-panel {
       position: fixed; top: 44px; left: 8px; z-index: 20; width: 340px; max-width: calc(100vw - 16px);
@@ -36,6 +45,7 @@
   <canvas id="cs16-canvas"></canvas>
 
   <div id="topbar">
+    <img class="brand-logo" src="./icons/icon-192.png" alt="cs16-rs" width="24" height="24">
     <button id="btn-toggle-panel">Menu</button>
     <button id="btn-fullscreen">Fullscreen</button>
     <span id="status-pill">Initializing...</span>

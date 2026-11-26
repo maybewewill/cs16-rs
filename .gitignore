@@ -1,7 +1,20 @@
 /target
 /dist
 /config.cfg
+/.superpowers/
 *.log
 *.png
 .DS_Store
 Thumbs.db
+
+# Official project branding, PWA, and desktop icons
+!.github/assets/
+!.github/assets/*.png
+!.github/assets/*.jpg
+!.github/assets/*.ico
+!web/icons/
+!web/icons/*.png
+!web/favicon.ico
+!crates/cs-client/assets/
+!crates/cs-client/assets/*.png
+!crates/cs-client/assets/*.ico

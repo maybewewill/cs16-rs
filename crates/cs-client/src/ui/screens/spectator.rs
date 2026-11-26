@@ -723,60 +723,74 @@ fn draw_spec_hud_bars(
     let font_xs = egui::FontId::monospace((10.0 * sy).clamp(9.0, 13.0));
 
     let mut draw_team_column = |list: &[&SpecSidebarPlayer], left_x: f32, is_ct: bool| {
+        // Authentic CS 1.6 `ClientScheme.res` team colors (`team2` CT, `team1` T) and translucent dark HUD panels.
         let accent = if is_ct {
-            Color32::from_rgb(64, 144, 248)
+            Color32::from_rgb(153, 204, 255)
         } else {
-            Color32::from_rgb(235, 92, 52)
+            Color32::from_rgb(255, 64, 64)
         };
-        let fill_alive = if is_ct {
-            Color32::from_rgba_unmultiplied(18, 28, 44, 210)
-        } else {
-            Color32::from_rgba_unmultiplied(44, 22, 18, 210)
-        };
-        let fill_dead = Color32::from_rgba_unmultiplied(16, 16, 18, 150);
+        let fill_alive = Color32::from_rgba_unmultiplied(0, 0, 0, 168);
+        let fill_dead = Color32::from_rgba_unmultiplied(0, 0, 0, 118);
+        let hud_amber = Color32::from_rgb(255, 160, 0);
+        let con_amber = Color32::from_rgb(255, 180, 30);
 
         for (i, p) in list.iter().take(max_cards).enumerate() {
-            let y = top_y + (i as f32) * (card_h + gap);
-            let rect = Rect::from_min_size(Pos2::new(left_x, y), Vec2::new(card_w, card_h));
+            let y = (top_y + (i as f32) * (card_h + gap)).floor();
+            let rect = Rect::from_min_size(Pos2::new(left_x.floor(), y), Vec2::new(card_w, card_h));
             let bg = if p.alive { fill_alive } else { fill_dead };
-            painter.rect_filled(rect, 2.0, bg);
+            painter.rect_filled(rect, 0.0, bg);
 
-            // Proportional HP fill bar across bottom half of alive card.
+            // Crisp 2px team accent strip along the outer screen edge (`0px` corners).
+            let strip_x = if is_ct { rect.left() } else { rect.right() - 2.0 };
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(strip_x, rect.top()), Vec2::new(2.0, rect.height())),
+                0.0,
+                if p.alive {
+                    accent
+                } else {
+                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 80)
+                },
+            );
+
+            // Proportional HP fill bar across bottom of alive card (`0px` sharp GoldSrc bar).
             if p.alive {
                 let hp_frac = (p.health as f32 / 100.0).clamp(0.0, 1.0);
-                let hp_w = rect.width() * hp_frac;
+                let hp_h = (3.0 * sy).round().max(2.0);
+                let hp_w = (rect.width() - 2.0).max(0.0) * hp_frac;
+                let hp_x = if is_ct { rect.left() + 2.0 } else { rect.left() };
                 let hp_rect = Rect::from_min_size(
-                    Pos2::new(rect.left(), rect.bottom() - (4.0 * sy).max(3.0)),
-                    Vec2::new(hp_w, (4.0 * sy).max(3.0)),
+                    Pos2::new(hp_x, rect.bottom() - hp_h),
+                    Vec2::new(hp_w, hp_h),
                 );
                 let hp_col = if p.health > 50 {
                     accent
                 } else if p.health > 20 {
-                    Color32::from_rgb(235, 185, 50)
+                    hud_amber
                 } else {
-                    Color32::from_rgb(225, 55, 45)
+                    Color32::from_rgb(255, 64, 64)
                 };
                 painter.rect_filled(hp_rect, 0.0, hp_col);
             }
 
             let border = if p.observed {
-                Stroke::new(2.0, Color32::from_rgb(255, 200, 60))
+                Stroke::new(1.0, hud_amber)
             } else if p.alive {
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 140))
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 145))
             } else {
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(90, 90, 90, 100))
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(110, 110, 110, 95))
             };
-            painter.rect_stroke(rect, 2.0, border, egui::StrokeKind::Inside);
+            painter.rect_stroke(rect, 0.0, border, egui::StrokeKind::Inside);
 
             let text_col = if p.alive {
                 Color32::from_rgb(240, 240, 240)
             } else {
-                Color32::from_rgb(140, 140, 140)
+                Color32::from_rgb(138, 138, 138)
             };
             let hdr_name: String = p.name.chars().take(15).collect();
             let top_txt = format!("[{}] {}", p.slot_key, hdr_name);
+            let name_x = rect.left() + if is_ct { 6.0 } else { 5.0 };
             painter.text(
-                Pos2::new(rect.left() + 5.0, rect.top() + 3.0),
+                Pos2::new(name_x, rect.top() + 3.0),
                 egui::Align2::LEFT_TOP,
                 top_txt,
                 font_sm.clone(),
@@ -784,11 +798,11 @@ fn draw_spec_hud_bars(
             );
             let kd_txt = format!("{} / {}", p.frags, p.deaths);
             painter.text(
-                Pos2::new(rect.right() - 5.0, rect.top() + 3.0),
+                Pos2::new(rect.right() - if is_ct { 5.0 } else { 6.0 }, rect.top() + 3.0),
                 egui::Align2::RIGHT_TOP,
                 kd_txt,
                 font_xs.clone(),
-                Color32::from_rgb(200, 200, 200),
+                Color32::from_rgb(204, 204, 204),
             );
 
             // Row 2: HP, $money, armor/helmet/defuser/C4 badges, primary weapon silhouette.
@@ -799,11 +813,11 @@ fn draw_spec_hud_bars(
                 "DEAD".to_string()
             };
             painter.text(
-                Pos2::new(rect.left() + 5.0, row2_y),
+                Pos2::new(name_x, row2_y),
                 egui::Align2::LEFT_TOP,
                 hp_txt,
                 font_xs.clone(),
-                if p.alive { accent } else { Color32::from_rgb(130, 130, 130) },
+                if p.alive { accent } else { Color32::from_rgb(128, 128, 128) },
             );
 
             let mut badge_x = rect.left() + (52.0 * sy).round();
@@ -813,7 +827,7 @@ fn draw_spec_hud_bars(
                     egui::Align2::LEFT_TOP,
                     format!("${money}"),
                     font_xs.clone(),
-                    Color32::from_rgb(125, 220, 115),
+                    hud_amber,
                 );
                 badge_x += (44.0 * sy).round();
             }
@@ -838,7 +852,7 @@ fn draw_spec_hud_bars(
                     egui::Align2::LEFT_TOP,
                     bstr,
                     font_xs.clone(),
-                    Color32::from_rgb(255, 196, 64),
+                    con_amber,
                 );
             }
 

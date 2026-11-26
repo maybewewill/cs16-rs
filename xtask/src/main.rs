@@ -106,22 +106,38 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
     }
 
     let pkg_dir = out_dir.join("pkg");
+    let icons_dir = out_dir.join("icons");
     std::fs::create_dir_all(&pkg_dir).map_err(|e| io_error(&pkg_dir, &e))?;
+    std::fs::create_dir_all(&icons_dir).map_err(|e| io_error(&icons_dir, &e))?;
 
     let static_files = [
         "index.html",
+        "admin.html",
         "app.js",
+        "admin.js",
         "vfs_loader.js",
         "transport.js",
         "input.js",
         "audio.js",
         "sw.js",
         "manifest.webmanifest",
+        "favicon.ico",
+    ];
+    let icon_files = [
+        "icon-512.png",
+        "icon-192.png",
+        "apple-touch-icon.png",
+        "favicon-32.png",
     ];
     let web_src = Path::new("web");
     for file in static_files {
         let src = web_src.join(file);
         let dst = out_dir.join(file);
+        std::fs::copy(&src, &dst).map_err(|e| io_error(&src, &e))?;
+    }
+    for file in icon_files {
+        let src = web_src.join("icons").join(file);
+        let dst = icons_dir.join(file);
         std::fs::copy(&src, &dst).map_err(|e| io_error(&src, &e))?;
     }
 
