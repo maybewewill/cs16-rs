@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cs_assets::bsp::BspMap;
+use cs_assets::demo_pack::{DEMO_MAP_NAME, build_instant_demo_pack};
 use cs_assets::scheme::{LocalizationTable, SkyboxTextures, VguiColors, load_menu_background};
 use cs_assets::vgui_scripts::TitlesTable;
 use cs_clientcore::hud::{DeathNotice, HudState, VguiMenuState};
@@ -92,6 +93,7 @@ fn load_window_icon() -> Option<winit::window::Icon> {
 
 pub struct LaunchConfig {
     pub gamedir: Option<PathBuf>,
+    pub demo: bool,
     pub startup_map: Option<String>,
     pub open_console: bool,
     pub startup_exec: Vec<String>,
@@ -108,6 +110,7 @@ impl Default for LaunchConfig {
     fn default() -> Self {
         Self {
             gamedir: None,
+            demo: false,
             startup_map: None,
             open_console: false,
             startup_exec: Vec::new(),
@@ -255,7 +258,7 @@ struct PendingRcon {
 }
 
 impl Cs16App {
-    pub fn new(launch: LaunchConfig) -> Self {
+    pub fn new(mut launch: LaunchConfig) -> Self {
         let mut cvars = CVarRegistry::new_with_defaults();
         let config_path = PathBuf::from("config.cfg");
 
@@ -275,7 +278,49 @@ impl Cs16App {
             .map(|p| p.display().to_string())
             .or_else(|| std::env::var("CS16_GAMEDIR").ok())
             .unwrap_or_default();
-        let (vfs, available_maps, palette, loc, setup_error) =
+        let (vfs, available_maps, palette, loc, setup_error) = if launch.demo {
+            let t0 = Instant::now();
+            let pack = build_instant_demo_pack();
+            let vfs = match Vfs::discover(launch.gamedir.as_deref(), vfs_cfg) {
+                Ok(mut real) => {
+                    let added = pack.mount_as_fallback(&mut real);
+                    cvars.info(format!(
+                        "Mounted Steam assets + {} clean-room Instant Demo fallback files in {:.1} ms.",
+                        added,
+                        t0.elapsed().as_secs_f32() * 1000.0
+                    ));
+                    real
+                }
+                Err(_) => {
+                    let v = pack.to_vfs();
+                    cvars.info(format!(
+                        "Mounted clean-room Instant Demo ({} files, {} KiB) in {:.1} ms — zero Steam files needed.",
+                        pack.file_count(),
+                        pack.total_bytes() / 1024,
+                        t0.elapsed().as_secs_f32() * 1000.0
+                    ));
+                    v
+                }
+            };
+            let maps = vfs.list_maps();
+            let colors = VguiColors::load(&vfs);
+            let lang = cvars.get_str("cl_language").to_string();
+            let loc = LocalizationTable::load_language(&vfs, &lang);
+            let has_connect = launch
+                .startup_exec
+                .iter()
+                .any(|c| c.trim_start().to_ascii_lowercase().starts_with("connect "));
+            if launch.startup_map.is_none() && !has_connect {
+                launch.startup_map = Some(DEMO_MAP_NAME.to_string());
+            }
+            if cvars.get_i32("bot_quota") <= 0 && !has_connect {
+                cvars.set("bot_quota", "9");
+            }
+            if launch.headless && launch.startup_ui.is_none() && !has_connect {
+                launch.startup_ui = Some("hud".to_string());
+            }
+            (Some(vfs), maps, VguiPalette::from(colors), Some(loc), None)
+        } else {
             match Vfs::discover(launch.gamedir.as_deref(), vfs_cfg) {
                 Ok(vfs) => {
                     let maps = vfs.list_maps();
@@ -305,7 +350,8 @@ impl Cs16App {
                         Some(msg),
                     )
                 }
-            };
+            }
+        };
 
         let mut console_ui = ConsoleUi::default();
         if launch.open_console {
@@ -467,6 +513,54 @@ impl Cs16App {
         self.loc = Some(loc);
         self.setup_error = None;
         Ok(())
+    }
+
+    fn launch_instant_demo(&mut self) {
+        let t0 = Instant::now();
+        let pack = build_instant_demo_pack();
+        let vfs = match self.vfs.take() {
+            Some(mut existing) => {
+                pack.mount_as_fallback(&mut existing);
+                existing
+            }
+            None => pack.to_vfs(),
+        };
+        let maps = vfs.list_maps();
+        let colors = VguiColors::load(&vfs);
+        let palette = VguiPalette::from(colors);
+        let lang = self.cvars.get_str("cl_language").to_string();
+        let loc = LocalizationTable::load_language(&vfs, &lang);
+
+        self.menu_ui.load_resources(&vfs, &lang);
+        self.options_ui.load_resources(&vfs);
+        self.vgui_rt.invalidate_cache();
+        self.vgui_rt.load_scheme_fonts(&vfs);
+        self.spectator_ui.load_assets(&vfs);
+        self.command_menu_ui.load_from_vfs(&vfs);
+        self.titles = TitlesTable::load(&vfs);
+        self.audio.load_sentences(&vfs);
+
+        if let Some(rt) = &mut self.runtime {
+            apply_vgui2_theme(&rt.egui_ctx, palette);
+            rt.hud_sprites = Some(HudSprites::load(&rt.egui_ctx, &vfs));
+            rt.vgui_bank = VguiAssetBank::load(&rt.egui_ctx, Some(&vfs));
+        }
+
+        self.cvars.info(format!(
+            "Instant Demo ready ({} files, {} KiB in {:.1} ms) — starting 5v5 on {DEMO_MAP_NAME}.",
+            pack.file_count(),
+            pack.total_bytes() / 1024,
+            t0.elapsed().as_secs_f32() * 1000.0
+        ));
+        self.vfs = Some(vfs);
+        self.available_maps = maps;
+        self.palette = palette;
+        self.loc = Some(loc);
+        self.setup_error = None;
+        if self.cvars.get_i32("bot_quota") <= 0 {
+            self.cvars.set("bot_quota", "9");
+        }
+        self.start_local_map(DEMO_MAP_NAME);
     }
 
     fn is_in_game(&self) -> bool {
@@ -3128,6 +3222,7 @@ impl Cs16App {
             .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let mod_decisions = draw_mod_approval_prompt(&rt.egui_ctx, &pending_mod_approvals);
         let mut mount_path_requested: Option<PathBuf> = None;
+        let mut launch_demo_from_setup = false;
         let mut open_console_from_setup = false;
         let mut quit_from_setup = false;
         if self.vfs.is_none() && !self.session.is_active() {
@@ -3208,6 +3303,17 @@ impl Cs16App {
                         });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
+                        let demo_btn = egui::Button::new(
+                            egui::RichText::new("Play Instant Demo (No Steam Files)")
+                                .color(pal.bright_control_text)
+                                .strong(),
+                        )
+                        .fill(pal.control_bg)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .stroke(egui::Stroke::new(1.0, pal.bright_control_text));
+                        if ui.add(demo_btn).clicked() {
+                            launch_demo_from_setup = true;
+                        }
                         let mount_btn = egui::Button::new(
                             egui::RichText::new("Mount Folder").color(pal.bright_control_text),
                         )
@@ -3497,6 +3603,9 @@ impl Cs16App {
         }
 
         // 5. Post-frame actions.
+        if launch_demo_from_setup {
+            self.launch_instant_demo();
+        }
         if let Some(dir) = mount_path_requested
             && let Err(err) = self.mount_gamedir(&dir)
         {

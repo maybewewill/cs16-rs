@@ -773,6 +773,7 @@ dependencies = [
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
+ "glam",
 ]
 
 [[package]]

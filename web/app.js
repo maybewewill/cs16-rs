@@ -206,15 +206,21 @@ async function connectToP2pRoom(room, signalOrigin) {
   input?.lockPointer();
 }
 
-function refreshMaps() {
+function refreshMaps(preferredMap = '') {
   if (!cs16Web || !mapSelect) return;
   const maps = cs16Web.listMaps?.() || [];
   mapSelect.innerHTML = '';
+  const defaultPick =
+    (preferredMap && maps.includes(preferredMap) && preferredMap) ||
+    (maps.includes('de_dust2') && 'de_dust2') ||
+    (maps.includes('dm_rusthouse') && 'dm_rusthouse') ||
+    maps[0] ||
+    '';
   for (const m of maps) {
     const opt = document.createElement('option');
     opt.value = m;
     opt.textContent = m;
-    if (m === 'de_dust2') opt.selected = true;
+    if (m === defaultPick) opt.selected = true;
     mapSelect.appendChild(opt);
   }
 }
@@ -331,6 +337,27 @@ async function main() {
       setStatus(`Invite ready: ${invite.joinLabel}${roomNote} — mount Half-Life folder`);
     }
   }
+
+  document.getElementById('btn-instant-demo')?.addEventListener('click', () => {
+    audio.unlock();
+    cs16Web.unlockAudio?.();
+    closeActiveTransports();
+    const bots = Math.max(0, Math.min(15, Number(botsInput?.value || 9)));
+    const t0 = performance.now();
+    const res = cs16Web.startInstantDemo?.(bots);
+    const ms = Math.max(1, Math.round(performance.now() - t0));
+    if (!res || !res.ok) {
+      setStatus(`Instant Demo failed: ${res?.error || 'unavailable'}`);
+      return;
+    }
+    const demoMap = res.map || 'dm_rusthouse';
+    refreshMaps(demoMap);
+    const kb = Math.round((res.bytes || 0) / 1024);
+    setAssetStatus(`Instant Demo active (${res.files || 0} procedural files, ${kb} KiB in ${ms} ms — zero Steam files needed)`);
+    panelEl?.classList.add('collapsed');
+    input.lockPointer();
+    setStatus(`Instant Demo: ${demoMap} (${bots} bots)`);
+  });
 
   document.getElementById('btn-pick-dir')?.addEventListener('click', () => {
     mountBatch(

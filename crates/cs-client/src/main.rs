@@ -65,6 +65,9 @@ pub(crate) fn parse_args_from<I: IntoIterator<Item = String>>(iter: I) -> Launch
             "--headless" => {
                 cfg.headless = true;
             }
+            "--demo" => {
+                cfg.demo = true;
+            }
             "--exec" | "-e" => {
                 if let Some(first) = args.get(i + 1) {
                     let mut parts = vec![first.as_str()];
@@ -206,5 +209,15 @@ mod tests {
             ["connect 127.0.0.1:27015", "connect 127.0.0.1:27016"]
         );
         assert_eq!((unquoted.width, unquoted.height), (800, 600));
+
+        let demo_cfg = parse_args_from([
+            "--demo".to_string(),
+            "--headless".to_string(),
+            "--screenshot".to_string(),
+            "demo.png".to_string(),
+        ]);
+        assert!(demo_cfg.demo);
+        assert!(demo_cfg.headless);
+        assert_eq!(demo_cfg.auto_screenshot, Some(PathBuf::from("demo.png")));
     }
 }

@@ -52,6 +52,17 @@ impl WebRuntime {
     }
 }
 
+fn refresh_ui_assets(g: &mut WebRuntime) {
+    let vfs = g.state.vfs.clone();
+    if let Some(ref v) = vfs {
+        let colors = VguiColors::load(v);
+        g.vgui_palette = VguiPalette::from(colors);
+        apply_vgui2_theme(&g.egui_ctx, g.vgui_palette);
+        g.hud_sprites = Some(HudSprites::load(&g.egui_ctx, v));
+        g.vgui_bank = Some(VguiAssetBank::load(&g.egui_ctx, Some(v)));
+    }
+}
+
 /// Registers the `window.cs16Web` API for `web/app.js`.
 pub fn install() {
     let Some(window) = web_sys::window() else {
@@ -119,16 +130,68 @@ pub fn install() {
         let closure: Closure<dyn FnMut()> = Closure::new(move || {
             let mut g = rt_c.borrow_mut();
             g.state.finish_mount();
-            let vfs = g.state.vfs.clone();
-            if let Some(ref v) = vfs {
-                let colors = VguiColors::load(v);
-                g.vgui_palette = VguiPalette::from(colors);
-                apply_vgui2_theme(&g.egui_ctx, g.vgui_palette);
-                g.hud_sprites = Some(HudSprites::load(&g.egui_ctx, v));
-                g.vgui_bank = Some(VguiAssetBank::load(&g.egui_ctx, Some(v)));
-            }
+            refresh_ui_assets(&mut g);
         });
         let _ = Reflect::set(&api, &JsValue::from_str("finishMount"), &closure.into_js_value());
+    }
+
+    // mountInstantDemo() -> { files: number, bytes: number, map: string }
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut() -> JsValue> = Closure::new(move || {
+            let mut g = rt_c.borrow_mut();
+            let (files, bytes) = g.state.mount_instant_demo();
+            refresh_ui_assets(&mut g);
+            let res = Object::new();
+            set_prop(&res, "files", JsValue::from_f64(files as f64));
+            set_prop(&res, "bytes", JsValue::from_f64(bytes as f64));
+            set_prop(
+                &res,
+                "map",
+                JsValue::from_str(cs_assets::demo_pack::DEMO_MAP_NAME),
+            );
+            res.into()
+        });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("mountInstantDemo"),
+            &closure.into_js_value(),
+        );
+    }
+
+    // startInstantDemo(bots) -> { ok: boolean, files: number, bytes: number, map: string, error?: string }
+    {
+        let rt_c = Rc::clone(&rt);
+        let closure: Closure<dyn FnMut(u32) -> JsValue> = Closure::new(move |bots: u32| {
+            let mut g = rt_c.borrow_mut();
+            let res = Object::new();
+            match g.state.start_instant_demo(bots) {
+                Ok((files, bytes)) => {
+                    refresh_ui_assets(&mut g);
+                    set_prop(&res, "ok", JsValue::from_bool(true));
+                    set_prop(&res, "files", JsValue::from_f64(files as f64));
+                    set_prop(&res, "bytes", JsValue::from_f64(bytes as f64));
+                    set_prop(
+                        &res,
+                        "map",
+                        JsValue::from_str(cs_assets::demo_pack::DEMO_MAP_NAME),
+                    );
+                }
+                Err(err) => {
+                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                        "startInstantDemo failed: {err}"
+                    )));
+                    set_prop(&res, "ok", JsValue::from_bool(false));
+                    set_prop(&res, "error", JsValue::from_str(&err));
+                }
+            }
+            res.into()
+        });
+        let _ = Reflect::set(
+            &api,
+            &JsValue::from_str("startInstantDemo"),
+            &closure.into_js_value(),
+        );
     }
 
     // listMaps() -> Array<String>

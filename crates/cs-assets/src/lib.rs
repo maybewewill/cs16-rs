@@ -2,6 +2,7 @@
 //! `TrackerScheme.res`, `BackgroundLayout.txt`, `hud.txt`, Skybox TGA).
 
 pub mod bsp;
+pub mod demo_pack;
 pub mod gamma;
 pub mod hpak;
 pub mod materials;

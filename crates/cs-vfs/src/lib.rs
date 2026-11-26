@@ -442,6 +442,30 @@ impl Vfs {
         self.mod_overlays.len() != before
     }
 
+    /// Mounts in-memory fallback assets strictly BELOW all existing VFS layers (`cstrike`,
+    /// `valve`, `platform`, mods, or backend). Existing files are never shadowed.
+    /// Returns the number of newly added fallback entries.
+    pub fn mount_fallback_assets(
+        &mut self,
+        files: impl IntoIterator<Item = (String, Vec<u8>)>,
+    ) -> usize {
+        let mut added = 0usize;
+        for (raw_path, bytes) in files {
+            let key = match split_goldsrc_layer(&raw_path, &self.config) {
+                Some((_, rel)) => rel,
+                None => continue,
+            };
+            if self.index.contains_key(&key)
+                || self.backend.as_ref().is_some_and(|b| b.contains(&key))
+            {
+                continue;
+            }
+            self.index.insert(key, Source::Memory(bytes));
+            added += 1;
+        }
+        added
+    }
+
     /// Real filesystem path of a disk-backed file; `None` if absent or held in memory/backend.
     pub fn resolve(&self, rel_path: &str) -> Option<&Path> {
         match self.lookup_source(&Self::normalize(rel_path))? {
@@ -531,6 +555,7 @@ fn split_goldsrc_layer(raw_path: &str, config: &VfsConfig) -> Option<(u8, String
     let parts: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
     for (idx, &seg) in parts.iter().enumerate() {
         let rank = match seg {
+            "demo" | "demo_fallback" => Some((0u8, idx + 1)),
             "platform" => Some((1u8, idx + 1)),
             "valve" => Some((2u8, idx + 1)),
             "cstrike" => Some((3u8, idx + 1)),

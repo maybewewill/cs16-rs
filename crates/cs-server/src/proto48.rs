@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
+use cs_assets::demo_pack::{DEMO_MAP_NAME, build_instant_demo_pack};
 use cs_engine::collision::Hull;
 use cs_engine::{
     ConsoleOutcome, EdictId, GameDll, GameStatEvent, Server, ServerConfig, ServerMap,
@@ -51,7 +52,9 @@ const DEFAULT_PORT: u16 = 27015;
 
 struct Options {
     gamedir: Option<PathBuf>,
+    demo: bool,
     map: String,
+    map_explicit: bool,
     port: u16,
     max_players: u8,
     hostname: String,
@@ -79,7 +82,9 @@ struct Options {
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut opts = Options {
         gamedir: None,
+        demo: false,
         map: "de_dust2".to_string(),
+        map_explicit: false,
         port: DEFAULT_PORT,
         max_players: 16,
         hostname: ServerConfig::default().hostname,
@@ -107,6 +112,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
             "--proto48" => {}
+            "--demo" => opts.demo = true,
             "--walk-game" => opts.walk_game = true,
             "--admin" => opts.admin = true,
             "--embed-web" => opts.embed_web = true,
@@ -117,7 +123,10 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .map_err(|_| format!("{arg}: not a non-negative integer: {v}"))?;
             }
             "--gamedir" | "-g" => opts.gamedir = Some(PathBuf::from(value()?)),
-            "--map" | "-m" => opts.map = value()?.clone(),
+            "--map" | "-m" => {
+                opts.map = value()?.clone();
+                opts.map_explicit = true;
+            }
             "--port" | "-p" => {
                 let v = value()?;
                 opts.port = v.parse().map_err(|_| format!("{arg}: not a port: {v}"))?;
@@ -187,6 +196,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             other => return Err(format!("unknown argument `{other}`")),
         }
+    }
+    if opts.demo && !opts.map_explicit {
+        opts.map = DEMO_MAP_NAME.to_string();
     }
     if !opts.relay_allow.is_empty() && opts.web_port.is_none() {
         return Err("--relay-allow requires --web-port".to_string());
@@ -373,8 +385,35 @@ fn start(args: &[String]) -> Result<(), String> {
         print!("{}", report.summary());
         return Ok(());
     }
-    let mut vfs = Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
-        .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?;
+    let mut vfs = if opts.demo {
+        let t0 = std::time::Instant::now();
+        let pack = build_instant_demo_pack();
+        let mut v = match Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default()) {
+            Ok(mut real) => {
+                let added = pack.mount_as_fallback(&mut real);
+                info!(
+                    added,
+                    elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0,
+                    "Mounted clean-room Instant Demo pack as lowest-priority fallback below Steam assets"
+                );
+                real
+            }
+            Err(_) => {
+                info!(
+                    files = pack.file_count(),
+                    bytes = pack.total_bytes(),
+                    elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0,
+                    "Mounted clean-room Instant Demo pack (zero Steam files required)"
+                );
+                pack.to_vfs()
+            }
+        };
+        let _ = &mut v;
+        v
+    } else {
+        Vfs::discover(opts.gamedir.as_deref(), VfsConfig::default())
+            .map_err(|e| format!("cannot find the Half-Life / CS 1.6 directory: {e}"))?
+    };
     let map = load_server_map(&vfs, &opts.map)?;
     let plugins_toml = discover_plugins_toml(opts.plugins_toml.as_deref(), &vfs);
     let host = build_unified_mod_host(
@@ -3492,5 +3531,23 @@ def on_hang(player, args):
             "WebTransport client should keep receiving NetChan game frames"
         );
         assert_eq!(wt_conn.stats().parse_errors, 0);
+    }
+
+    #[test]
+    fn parse_demo_flag_defaults_map_to_dm_rusthouse_unless_explicit() {
+        let to_args = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+        let default_opts = parse(&to_args(&[])).expect("parse empty args");
+        assert!(!default_opts.demo);
+        assert_eq!(default_opts.map, "de_dust2");
+
+        let demo_opts = parse(&to_args(&["--demo"])).expect("parse --demo");
+        assert!(demo_opts.demo);
+        assert_eq!(demo_opts.map, DEMO_MAP_NAME);
+
+        let demo_explicit =
+            parse(&to_args(&["--demo", "--map", "de_inferno"])).expect("parse --demo --map");
+        assert!(demo_explicit.demo);
+        assert_eq!(demo_explicit.map, "de_inferno");
     }
 }

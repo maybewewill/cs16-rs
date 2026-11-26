@@ -96,7 +96,13 @@ pub fn load_decal_names(vfs: &Vfs) -> Vec<String> {
             .ok()
             .and_then(|bytes| wad_lump_names(&bytes))
     };
-    let wads: Vec<Vec<String>> = ["valve", "cstrike"].into_iter().filter_map(lumps).collect();
+    let mut wads: Vec<Vec<String>> = ["valve", "cstrike"].into_iter().filter_map(lumps).collect();
+    if wads.is_empty()
+        && let Ok(bytes) = vfs.read_bytes("decals.wad")
+        && let Some(names) = wad_lump_names(&bytes)
+    {
+        wads.push(names);
+    }
     decal_names_from_wads(&wads)
 }
 
@@ -546,5 +552,190 @@ mod tests {
         let out = local.console("mod_list");
         assert!(out.contains("no mods loaded"), "out={out}");
         assert!(local.cs_game().state().players[0].is_some());
+    }
+
+    #[test]
+    fn dm_rusthouse_hulls_spawns_and_5v5_zbot_combat() {
+        use cs_assets::demo_pack::{DEMO_MAP_NAME, build_instant_demo_pack};
+        use cs_engine::WorldCollision;
+        use cs_engine::collision::{CONTENTS_EMPTY, Hull};
+        use glam::Vec3;
+
+        let pack = build_instant_demo_pack();
+        let vfs = pack.to_vfs();
+        let bsp = BspMap::load(&vfs, DEMO_MAP_NAME).expect("load dm_rusthouse.bsp");
+        let coll = WorldCollision::from_bsp(&bsp);
+
+        // 1. Every CT & T spawn point must be in empty space (never embedded in solid) across all 4 hulls.
+        assert_eq!(bsp.spawns.len(), 16);
+        for (idx, sp) in bsp.spawns.iter().enumerate() {
+            for hull in [Hull::Point, Hull::Standing, Hull::Large, Hull::Crouched] {
+                let contents = coll.point_contents(sp.position, hull);
+                assert_eq!(
+                    contents, CONTENTS_EMPTY,
+                    "spawn #{idx} {:?} embedded in solid for hull {hull:?} (contents={contents})",
+                    sp.position
+                );
+                let tr_down = coll.trace_world(
+                    sp.position,
+                    sp.position - Vec3::new(0.0, 0.0, 64.0),
+                    hull,
+                );
+                assert!(
+                    !tr_down.start_solid && !tr_down.all_solid && tr_down.fraction < 1.0,
+                    "spawn #{idx} hull {hull:?} floor trace failed: {tr_down:?}"
+                );
+                assert!(
+                    tr_down.plane_normal.z > 0.99,
+                    "spawn #{idx} hull {hull:?} should land on flat floor, normal={:?}",
+                    tr_down.plane_normal
+                );
+            }
+        }
+
+        // 2. Verify walkable slope trace on the West ramp (`normal.z >= 0.7`) and central bridge top (`z = 64`).
+        let ramp_tr = coll.trace_world(
+            Vec3::new(-192.0, 0.0, 128.0),
+            Vec3::new(-192.0, 0.0, 0.0),
+            Hull::Standing,
+        );
+        assert!(
+            !ramp_tr.start_solid && ramp_tr.fraction < 1.0 && ramp_tr.plane_normal.z >= 0.7,
+            "west ramp standing hull trace should hit walkable slope: {ramp_tr:?}"
+        );
+        let bridge_tr = coll.trace_world(
+            Vec3::new(0.0, 0.0, 160.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            Hull::Standing,
+        );
+        assert!(
+            !bridge_tr.start_solid
+                && bridge_tr.fraction < 1.0
+                && (bridge_tr.end_pos.z - 100.0).abs() < 1.0,
+            "bridge standing floor should be at z = 64 + 36 = 100, got {:?}",
+            bridge_tr.end_pos
+        );
+        // Verify bullet ray (Hull 0) hits cover crate cleanly and `trace_texture` finds surface name.
+        let crate_ray = coll.trace_world(
+            Vec3::new(-450.0, -288.0, 48.0),
+            Vec3::new(-200.0, -288.0, 48.0),
+            Hull::Point,
+        );
+        assert!(
+            !crate_ray.start_solid && crate_ray.fraction < 1.0 && crate_ray.hit_solid,
+            "Hull 0 bullet ray should hit NW crate: {crate_ray:?}"
+        );
+        let floor_tex = coll.trace_texture(0, Vec3::new(0.0, 200.0, 64.0), Vec3::new(0.0, 200.0, -16.0));
+        assert_eq!(floor_tex, Some("RH_FLOOR"));
+
+        // 3. Boot a 5v5 ZBot match (9 bots + local player) on `dm_rusthouse` and run 600+ ticks.
+        let opts = LocalOptions {
+            max_clients: 12,
+            bots: 9,
+            text_menus: true,
+            ..LocalOptions::default()
+        };
+        let mut local = LocalGame::start(&vfs, DEMO_MAP_NAME, &opts).expect("start dm_rusthouse");
+        assert_eq!(local.connection().state(), &ConnState::InGame);
+        let _ = local.console("mp_freezetime 0");
+        local.connection_mut().execute_local("jointeam 2");
+        local.run_frames(5);
+        local.connection_mut().execute_local("joinclass 1");
+        // `bot_quota` adds bots staggered over time (~0.35s each); wait until all 9 join.
+        for _ in 0..800 {
+            local.step();
+            if local.server().fake_client_count() >= 9 {
+                break;
+            }
+        }
+        assert_eq!(
+            local.server().fake_client_count(),
+            9,
+            "all 9 ZBots should join for 5v5 match"
+        );
+        let _ = local.console("sv_restart 1");
+        local.run_frames(130); // complete 1s restart + spawn all 10 players
+
+        assert!(local.cs_game().bot_nav_built(), "dm_rusthouse.nav should be loaded");
+
+        let snapshot_bot_positions = |g: &LocalGame| -> Vec<(u8, Vec3)> {
+            let sv = g.server();
+            (0..12u8)
+                .filter_map(|slot| {
+                    if !sv.is_fake_client(slot) {
+                        return None;
+                    }
+                    let eid = sv.edicts().client(slot);
+                    let pos = sv.edicts().get(eid)?.vars.origin;
+                    Some((slot, pos))
+                })
+                .collect()
+        };
+        let initial_pos = snapshot_bot_positions(&local);
+        assert!(
+            initial_pos.len() >= 8,
+            "expected at least 8 active ZBots, got {}",
+            initial_pos.len()
+        );
+
+        let mut any_bot_fired = false;
+        let mut any_damage_or_kill = false;
+        let mut max_moved_bots = 0usize;
+
+        for _ in 0..8 {
+            for _ in 0..100 {
+                local.step();
+                let sv = local.server();
+                for &(slot, _) in &initial_pos {
+                    let eid = sv.edicts().client(slot);
+                    if let Some(e) = sv.edicts().get(eid)
+                        && (e.vars.button & 1) != 0
+                    {
+                        any_bot_fired = true;
+                    }
+                }
+            }
+            let now_pos = snapshot_bot_positions(&local);
+            let moved = now_pos
+                .iter()
+                .filter(|(slot, p)| {
+                    initial_pos
+                        .iter()
+                        .find(|(s, _)| s == slot)
+                        .is_some_and(|(_, p0)| (*p - *p0).truncate().length() > 64.0)
+                })
+                .count();
+            max_moved_bots = max_moved_bots.max(moved);
+
+            let st = local.cs_game().state();
+            let sv = local.server();
+            for &(slot, _) in &initial_pos {
+                if let Some(p) = st.players[usize::from(slot)].as_ref()
+                    && (p.deaths > 0 || p.frags != 0 || p.health < 100.0)
+                {
+                    any_bot_fired = true;
+                    any_damage_or_kill = true;
+                }
+                let eid = sv.edicts().client(slot);
+                if let Some(e) = sv.edicts().get(eid)
+                    && e.vars.health < 100.0
+                {
+                    any_damage_or_kill = true;
+                }
+            }
+            if max_moved_bots >= 6 && any_bot_fired && any_damage_or_kill {
+                break;
+            }
+        }
+
+        assert!(
+            max_moved_bots >= 6,
+            "expected >= 6 ZBots actively navigating dm_rusthouse (>64u moved), got {max_moved_bots}"
+        );
+        assert!(any_bot_fired, "expected ZBots to fire weapons on dm_rusthouse");
+        assert!(
+            any_damage_or_kill,
+            "expected ZBots to engage in combat (damage/frags) on dm_rusthouse"
+        );
     }
 }

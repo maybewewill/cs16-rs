@@ -73,6 +73,13 @@
     }
     button:hover, a.vgui-link:hover { background: #5a6a50; cursor: pointer; color: #c4b550; }
     button.primary { color: #c4b550; border-color: #c4b550; }
+    button.demo-cta {
+      width: 100%; background: #4c5844; color: #c4b550; font-weight: bold;
+      border-top: 1px solid #c4b550; border-left: 1px solid #c4b550;
+      border-right: 1px solid #282e22; border-bottom: 1px solid #282e22;
+      padding: 7px 8px; text-align: left;
+    }
+    button.demo-cta:hover { background: #5a6a50; color: #f4df8d; }
     input[type="text"], input[type="number"], select {
       flex: 1; background: #2c3327;
       border-top: 1px solid #282e22; border-left: 1px solid #282e22;
@@ -114,16 +121,19 @@
     </div>
 
     <div id="onboarding-card" class="onboarding-card">
-      <div class="step-item"><span class="step-num">1. Mount Local Assets:</span> Pick or drag-and-drop your local Steam <b>Half-Life</b> folder. Cached locally in IndexedDB &mdash; zero files are ever uploaded.</div>
-      <div class="step-item"><span class="step-num">2. Play Instantly:</span> Launch <b>Offline 5v5 with ZBots</b> on any mounted <code>.bsp</code> via WebGPU/WebGL2, or <b>Host a 1-Click WebRTC P2P Room</b>.</div>
-      <div class="step-item"><span class="step-num">3. Dedicated Multiplayer:</span> Connect to any TLS <code>wss://</code> server or self-hosted <code>cs-server --web-port</code>.</div>
+      <div class="step-item"><span class="step-num">1. Instant Demo (Zero Steam Files):</span> Click <b>Play Instant Demo</b> below for a 1-click 5v5 ZBot match on the clean-room <code>dm_rusthouse</code> arena &mdash; generated locally in &lt;150 ms.</div>
+      <div class="step-item"><span class="step-num">2. Full CS 1.6 (Local Steam Folder):</span> Mount or drag-and-drop your local Steam <b>Half-Life</b> folder to play <code>de_dust2</code> and all retail maps/models (cached in IndexedDB, zero uploads).</div>
+      <div class="step-item"><span class="step-num">3. Multiplayer / P2P:</span> Host a 1-click WebRTC P2P room or connect to any TLS <code>wss://</code> server or self-hosted <code>cs-server --web-port</code>.</div>
     </div>
 
     <div class="section-box">
-      <div class="section-label">1. Half-Life / CS 1.6 Assets (Local Only)</div>
-      <div id="asset-status">Drop your Half-Life folder here or mount it below.</div>
+      <div class="section-label">1. Instant Demo or Mount Steam Half-Life Folder</div>
       <div class="row">
-        <button id="btn-pick-dir" class="primary">Mount Half-Life Folder</button>
+        <button id="btn-instant-demo" class="demo-cta">&#9654; Play Instant Demo (No Steam Files Needed &mdash; 5v5 Bots on dm_rusthouse)</button>
+      </div>
+      <div id="asset-status">Click Play Instant Demo above, or mount your Steam Half-Life folder for Full CS 1.6.</div>
+      <div class="row">
+        <button id="btn-pick-dir" class="primary">Mount Steam Half-Life Folder (Full CS 1.6)</button>
         <button id="btn-pick-fallback">Folder Fallback</button>
         <button id="btn-clear-cache">Clear Cache</button>
         <input id="webkit-dir-input" type="file" webkitdirectory multiple hidden>

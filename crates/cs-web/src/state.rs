@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use cs_assets::bsp::BspMap;
+use cs_assets::demo_pack::{DEMO_MAP_NAME, build_instant_demo_pack};
 use cs_client::audio::mixer::{SND_FL_CHANGE_PITCH, SND_FL_CHANGE_VOL};
 use cs_client::audio::{
     MusicCommand, MusicController, SentenceTable, SoundFadeState, VoiceManager,
@@ -251,6 +252,43 @@ impl WebClientState {
     pub fn set_vfs(&mut self, vfs: Vfs) {
         self.load_sentences(&vfs);
         self.vfs = Some(vfs);
+    }
+
+    /// Generates and mounts the clean-room `dm_rusthouse` Instant Demo asset pack as a
+    /// lowest-priority fallback layer (never shadowing already-mounted Steam `cstrike`/`valve`
+    /// assets). Returns `(file_count, total_bytes)`.
+    pub fn mount_instant_demo(&mut self) -> (usize, usize) {
+        let pack = build_instant_demo_pack();
+        let summary = (pack.file_count(), pack.total_bytes());
+        match self.vfs.as_mut() {
+            Some(vfs) => {
+                pack.mount_as_fallback(vfs);
+            }
+            None => {
+                let vfs = pack.to_vfs();
+                self.load_sentences(&vfs);
+                self.vfs = Some(vfs);
+            }
+        }
+        summary
+    }
+
+    /// Mounts the clean-room `dm_rusthouse` demo pack as a lowest-priority fallback and
+    /// immediately launches a local ZBot match (e.g. `bots = 9` for 5v5) with auto-join into
+    /// active gameplay.
+    pub fn start_instant_demo(&mut self, bots: u32) -> Result<(usize, usize), String> {
+        let summary = self.mount_instant_demo();
+        self.start_local(DEMO_MAP_NAME, bots)?;
+        if let SessionMode::Local { game, .. } = &mut self.session {
+            game.connection_mut().execute_local("jointeam 2");
+            game.run_frames(4);
+            game.connection_mut().execute_local("joinclass 1");
+            game.run_frames(8);
+            let hud = &mut game.connection_mut().fx_mut().hud;
+            hud.menu = None;
+            hud.vgui_menu = None;
+        }
+        Ok(summary)
     }
 
     fn load_sentences(&mut self, vfs: &Vfs) {
@@ -1889,5 +1927,42 @@ mod tests {
 
         host.disconnect();
         assert!(!host.is_p2p_host());
+    }
+
+    #[test]
+    fn instant_demo_boots_without_steam_and_never_shadows_real_assets() {
+        // 1. Fresh WebClientState with zero Steam files -> start_instant_demo works out of the box!
+        let mut st = WebClientState::default();
+        assert!(st.list_maps().is_empty());
+        let (files, bytes) = st
+            .start_instant_demo(9)
+            .expect("start_instant_demo with 9 bots");
+        assert!(files > 120 && bytes > 100_000);
+        assert_eq!(st.conn_state(), Some(ConnState::InGame));
+        assert!(st.list_maps().contains(&"dm_rusthouse".to_string()));
+
+        let out = st.step(0.01);
+        assert_eq!(out.map_sync, MapSyncAction::Load("dm_rusthouse".to_string()));
+        st.mark_map_loaded("dm_rusthouse");
+        let mut saw_view = false;
+        for _ in 0..100 {
+            let step = st.step(0.01);
+            if step.view.is_some() {
+                saw_view = true;
+            }
+        }
+        assert!(saw_view, "Instant Demo should emit FrameView renders");
+
+        // 2. Real Steam assets already mounted -> mount_instant_demo MUST NOT shadow them!
+        let mut st_steam = WebClientState::default();
+        let steam_sentinel = b"STEAM_CSTRIKE_AK47".to_vec();
+        st_steam.mount_file("cstrike/models/v_ak47.mdl", steam_sentinel.clone());
+        st_steam.finish_mount();
+        let _ = st_steam.mount_instant_demo();
+        assert_eq!(
+            st_steam.read_file("models/v_ak47.mdl").as_deref(),
+            Some(steam_sentinel.as_slice())
+        );
+        assert!(st_steam.read_file("maps/dm_rusthouse.bsp").is_some());
     }
 }
