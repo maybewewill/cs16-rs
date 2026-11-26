@@ -2,8 +2,10 @@
 //!
 //! It is the Protocol 48 server for the original client and for `cs-client` (see
 //! `proto48.rs`): `cargo run -p cs-server -- --map de_dust2` runs the game of
-//! `cs-game`; add `--walk-game` for the older walking-only `WalkGame` of `cs-sim`. The
-//! `--proto48` flag of the earlier two-mode server is still accepted and does nothing.
+//! `cs-game`; add `--walk-game` for the older walking-only `WalkGame` of `cs-sim`.
+//! Optional `--web-port` enables HTTP/WebSocket browser hosting and `--webtransport-port`
+//! (with optional `--wt-cert` / `--wt-key` PEM files) enables HTTP/3 WebTransport datagrams.
+//! The `--proto48` flag of the earlier two-mode server is still accepted and does nothing.
 
 mod admin_http;
 mod console_io;

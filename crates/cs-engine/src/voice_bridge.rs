@@ -14,7 +14,8 @@ use cs_transport::PeerAddr;
 pub enum VoiceSlotKind {
     /// Retail `hl.exe` or native `cs-client` connected via UDP or loopback.
     NativeOrRetail,
-    /// Browser `cs-web` client connected via WebSocket/WebRTC (`PeerAddr::Web`).
+    /// Browser `cs-web` client connected via WebSocket/WebRTC/WebTransport
+    /// (`PeerAddr::Web` or `PeerAddr::WebTransport`).
     WebBrowser,
 }
 
@@ -22,7 +23,7 @@ impl VoiceSlotKind {
     /// Classifies a slot from its transport peer address.
     pub fn from_peer_addr(addr: Option<&PeerAddr>) -> Self {
         match addr {
-            Some(PeerAddr::Web(_)) => Self::WebBrowser,
+            Some(PeerAddr::Web(_) | PeerAddr::WebTransport(_)) => Self::WebBrowser,
             _ => Self::NativeOrRetail,
         }
     }
@@ -106,6 +107,10 @@ mod tests {
         );
         assert_eq!(
             VoiceSlotKind::from_peer_addr(Some(&PeerAddr::Web(7))),
+            VoiceSlotKind::WebBrowser
+        );
+        assert_eq!(
+            VoiceSlotKind::from_peer_addr(Some(&PeerAddr::WebTransport(9))),
             VoiceSlotKind::WebBrowser
         );
 

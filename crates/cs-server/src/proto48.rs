@@ -27,7 +27,7 @@ use cs_sim::pmove::MoveParams;
 use cs_sim::walk_game::WalkGame;
 use cs_transport::{
     HttpHook, MultiTransport, PacketTransport, PeerAddr, PeerKind, TransportError, UdpTransport,
-    UpgradeHook, WsServerConfig, WsServerTransport,
+    UpgradeHook, WsServerConfig, WsServerTransport, WtServerConfig, WtServerTransport,
 };
 use cs_transport::ws_proto::HttpRequest;
 use cs_vfs::{Vfs, VfsConfig};
@@ -60,6 +60,9 @@ struct Options {
     walk_game: bool,
     web_port: Option<u16>,
     web_dir: Option<PathBuf>,
+    webtransport_port: Option<u16>,
+    wt_cert: Option<PathBuf>,
+    wt_key: Option<PathBuf>,
     admin: bool,
     replay_rounds: usize,
     embed_web: bool,
@@ -84,6 +87,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         walk_game: false,
         web_port: None,
         web_dir: None,
+        webtransport_port: None,
+        wt_cert: None,
+        wt_key: None,
         admin: false,
         replay_rounds: DEFAULT_MAX_REPLAY_ROUNDS,
         embed_web: false,
@@ -142,6 +148,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 opts.web_port = Some(p);
             }
             "--web-dir" => opts.web_dir = Some(PathBuf::from(value()?)),
+            "--webtransport-port" => {
+                let v = value()?;
+                let p: u16 = v
+                    .parse()
+                    .map_err(|_| format!("{arg}: not a port: {v}"))?;
+                opts.webtransport_port = Some(p);
+            }
+            "--wt-cert" => opts.wt_cert = Some(PathBuf::from(value()?)),
+            "--wt-key" => opts.wt_key = Some(PathBuf::from(value()?)),
             "--mods-dir" => opts.mods_dir = Some(PathBuf::from(value()?)),
             "--amxx-dir" => opts.amxx_dir = Some(PathBuf::from(value()?)),
             "--plugins-toml" => opts.plugins_toml = Some(PathBuf::from(value()?)),
@@ -175,6 +190,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if !opts.relay_allow.is_empty() && opts.web_port.is_none() {
         return Err("--relay-allow requires --web-port".to_string());
+    }
+    if opts.wt_cert.is_some() != opts.wt_key.is_some() {
+        return Err("--wt-cert and --wt-key must be provided together".to_string());
+    }
+    if (opts.wt_cert.is_some() || opts.wt_key.is_some()) && opts.webtransport_port.is_none() {
+        return Err("--wt-cert/--wt-key require --webtransport-port".to_string());
     }
     if opts.amxx_dir.is_some() && opts.walk_game {
         return Err("--amxx-dir cannot be combined with --walk-game".to_string());
@@ -524,6 +545,33 @@ fn grenade_kind_from_model(model: &str) -> Option<TimelineGrenadeKind> {
     }
 }
 
+/// Public WebTransport discovery metadata served by `GET /api/server-info`.
+#[derive(Debug, Clone)]
+struct WebTransportInfo {
+    port: u16,
+    path: String,
+    cert_sha256_base64: String,
+    cert_sha256_hex: String,
+    self_signed: bool,
+}
+
+fn extract_host_from_header(host_header: Option<&str>) -> &str {
+    let Some(raw) = host_header.map(str::trim).filter(|h| !h.is_empty()) else {
+        return "127.0.0.1";
+    };
+    if let Some(rest) = raw.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return &raw[..=end + 1];
+        }
+        return "127.0.0.1";
+    }
+    raw.split(':')
+        .next()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1")
+}
+
 /// Live server-side replay store + match stats + player scoreboard cache for `AdminBackend`.
 struct Phase13Runtime {
     replays: RoundReplayStore,
@@ -534,6 +582,7 @@ struct Phase13Runtime {
     round_started_at: f64,
     game_port: u16,
     web_port: Option<u16>,
+    webtransport: Option<WebTransportInfo>,
     available_maps: Vec<String>,
     admin_html: Option<Vec<u8>>,
     vfs: Option<Vfs>,
@@ -574,6 +623,7 @@ impl Phase13Runtime {
             round_started_at: started_at,
             game_port,
             web_port,
+            webtransport: None,
             available_maps,
             admin_html,
             vfs: None,
@@ -591,6 +641,10 @@ impl Phase13Runtime {
             last_bomb_pos: [0.0; 3],
             lobbies: LobbyRegistry::default(),
         }
+    }
+
+    fn set_webtransport(&mut self, info: Option<WebTransportInfo>) {
+        self.webtransport = info;
     }
 
     fn set_map_context(
@@ -1167,11 +1221,7 @@ impl Phase13Runtime {
     }
 
     fn servers_list_json<G: GameDll>(&self, server: &Server<G>, host_header: Option<&str>) -> String {
-        let host = host_header
-            .and_then(|h| h.split(':').next())
-            .map(str::trim)
-            .filter(|h| !h.is_empty())
-            .unwrap_or("127.0.0.1");
+        let host = extract_host_from_header(host_header);
         let addr = format!("{host}:{}", self.game_port);
         let infos = server.client_infos();
         let players = infos.len();
@@ -1190,6 +1240,35 @@ impl Phase13Runtime {
             bots,
         )
     }
+
+    fn server_info_json<G: GameDll>(&self, server: &Server<G>, host_header: Option<&str>) -> String {
+        let host = extract_host_from_header(host_header);
+        let web_port_json = match self.web_port {
+            Some(p) => p.to_string(),
+            None => "null".to_string(),
+        };
+        let wt_json = match &self.webtransport {
+            Some(wt) => {
+                let url = format!("https://{host}:{}{}", wt.port, wt.path);
+                format!(
+                    "{{\"port\":{},\"path\":{},\"url\":{},\"cert_sha256_base64\":{},\"cert_sha256_hex\":{},\"self_signed\":{}}}",
+                    wt.port,
+                    escape_json_str(&wt.path),
+                    escape_json_str(&url),
+                    escape_json_str(&wt.cert_sha256_base64),
+                    escape_json_str(&wt.cert_sha256_hex),
+                    wt.self_signed,
+                )
+            }
+            None => "null".to_string(),
+        };
+        format!(
+            "{{\"hostname\":{},\"map\":{},\"game_port\":{},\"web_port\":{web_port_json},\"webtransport\":{wt_json}}}",
+            escape_json_str(&server.hostname()),
+            escape_json_str(server.map_name()),
+            self.game_port,
+        )
+    }
 }
 
 enum PendingHttpRequest {
@@ -1204,6 +1283,10 @@ enum PendingHttpRequest {
         reply: Sender<AdminHttpResponse>,
     },
     ServersJson {
+        host: Option<String>,
+        reply: Sender<String>,
+    },
+    ServerInfoJson {
         host: Option<String>,
         reply: Sender<String>,
     },
@@ -1547,6 +1630,52 @@ fn make_http_hook(
             return true;
         }
 
+        if req.path == "/api/server-info" {
+            if req.method == "OPTIONS" {
+                let _ = AdminHttpResponse::cors_no_content().write_to(stream, false);
+                return true;
+            }
+            if req.method != "GET" && req.method != "HEAD" {
+                write_cors_json_response(
+                    stream,
+                    "405 Method Not Allowed",
+                    "{\"error\":\"method not allowed\"}",
+                    false,
+                );
+                return true;
+            }
+            let (reply_tx, reply_rx) = mpsc::channel();
+            if tx
+                .send(PendingHttpRequest::ServerInfoJson {
+                    host: req.header("host").map(str::to_string),
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                write_cors_json_response(
+                    stream,
+                    "503 Service Unavailable",
+                    "{\"error\":\"server unavailable\"}",
+                    false,
+                );
+                return true;
+            }
+            match reply_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(json) => {
+                    write_cors_json_response(stream, "200 OK", &json, req.method == "HEAD");
+                }
+                Err(_) => {
+                    write_cors_json_response(
+                        stream,
+                        "503 Service Unavailable",
+                        "{\"error\":\"server timeout\"}",
+                        false,
+                    );
+                }
+            }
+            return true;
+        }
+
         if is_lobby_path(&req.path) {
             let body = match read_http_body(req, leftover, stream, MAX_API_BODY_BYTES) {
                 Ok(b) => b,
@@ -1690,6 +1819,10 @@ fn process_pending_http<G: GameDll + 'static>(
                 let json = runtime.servers_list_json(server, host.as_deref());
                 let _ = reply.send(json);
             }
+            PendingHttpRequest::ServerInfoJson { host, reply } => {
+                let json = runtime.server_info_json(server, host.as_deref());
+                let _ = reply.send(json);
+            }
             PendingHttpRequest::Admin {
                 head,
                 body,
@@ -1733,7 +1866,7 @@ fn serve<G: GameDll + 'static>(
     let effective_web_port = opts.web_port.or(opts.admin.then_some(27016));
     let static_dir = opts.web_dir.clone().or_else(default_web_dir);
     let (http_tx, http_rx) = mpsc::channel::<PendingHttpRequest>();
-    let mut net = if let Some(web_port) = effective_web_port {
+    let ws_srv = if let Some(web_port) = effective_web_port {
         let upgrade_hook: Option<UpgradeHook> = if !opts.relay_allow.is_empty() {
             let policy = RelayPolicy {
                 allowlist: TargetAllowlist::from_addrs(opts.relay_allow.iter().copied()),
@@ -1747,7 +1880,7 @@ fn serve<G: GameDll + 'static>(
             None
         };
         let http_hook = make_http_hook(http_tx, static_dir.clone(), opts.embed_web);
-        let ws_srv = WsServerTransport::bind(WsServerConfig {
+        let ws = WsServerTransport::bind(WsServerConfig {
             bind_addr: format!("0.0.0.0:{web_port}"),
             static_dir: static_dir.clone(),
             ws_path: "/ws".to_string(),
@@ -1756,7 +1889,7 @@ fn serve<G: GameDll + 'static>(
             http_hook: Some(http_hook),
         })
         .map_err(|e| format!("cannot bind WebSocket/HTTP on 0.0.0.0:{web_port}: {e}"))?;
-        let ws_addr = ws_srv.local_addr();
+        let ws_addr = ws.local_addr();
         info!(
             http = %format!("http://127.0.0.1:{}", ws_addr.port()),
             admin = %format!("http://127.0.0.1:{}/admin", ws_addr.port()),
@@ -1766,9 +1899,51 @@ fn serve<G: GameDll + 'static>(
             relay_targets = opts.relay_allow.len(),
             "Web client hosting and WebSocket transport enabled"
         );
+        Some(ws)
+    } else {
+        None
+    };
+
+    let (wt_srv, wt_info) = if let Some(wt_port) = opts.webtransport_port {
+        let wt = WtServerTransport::bind(WtServerConfig {
+            bind_addr: format!("0.0.0.0:{wt_port}"),
+            wt_path: "/wt".to_string(),
+            max_clients: usize::from(opts.max_players) + 8,
+            cert_path: opts.wt_cert.clone(),
+            key_path: opts.wt_key.clone(),
+            ..WtServerConfig::default()
+        })
+        .map_err(|e| format!("cannot bind WebTransport on 0.0.0.0:{wt_port}: {e}"))?;
+        let wt_addr = wt.local_addr();
+        let digest = wt.cert_sha256();
+        let info_meta = WebTransportInfo {
+            port: wt_addr.port(),
+            path: "/wt".to_string(),
+            cert_sha256_base64: digest.to_base64(),
+            cert_sha256_hex: digest.to_colon_hex(),
+            self_signed: wt.is_self_signed(),
+        };
+        info!(
+            wt = %format!("https://127.0.0.1:{}/wt", wt_addr.port()),
+            cert_sha256_base64 = %info_meta.cert_sha256_base64,
+            cert_sha256_hex = %info_meta.cert_sha256_hex,
+            self_signed = info_meta.self_signed,
+            "HTTP/3 WebTransport datagram transport enabled"
+        );
+        (Some(wt), Some(info_meta))
+    } else {
+        (None, None)
+    };
+
+    let mut net = if ws_srv.is_some() || wt_srv.is_some() {
         let mut multi = MultiTransport::new();
         multi.add(PeerKind::Udp, udp);
-        multi.add(PeerKind::Web, ws_srv);
+        if let Some(ws) = ws_srv {
+            multi.add(PeerKind::Web, ws);
+        }
+        if let Some(wt) = wt_srv {
+            multi.add(PeerKind::WebTransport, wt);
+        }
         ServerTransport::Multi(multi)
     } else {
         ServerTransport::Udp(udp)
@@ -1815,6 +1990,7 @@ fn serve<G: GameDll + 'static>(
         vfs.list_maps(),
         static_dir.as_deref(),
     );
+    runtime.set_webtransport(wt_info);
     runtime.set_map_context(vfs.clone(), initial_collision, &map_name);
     runtime.begin_round_recording(&mut server, start_now);
 
@@ -3053,5 +3229,268 @@ def on_hang(player, args):
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parses_webtransport_cli_flags_and_validates_cert_key_pairs() {
+        let o = parse(&args(&[
+            "--webtransport-port",
+            "27017",
+            "--wt-cert",
+            "certs/server.pem",
+            "--wt-key",
+            "certs/server.key",
+        ]))
+        .unwrap();
+        assert_eq!(o.webtransport_port, Some(27017));
+        assert_eq!(o.wt_cert, Some(PathBuf::from("certs/server.pem")));
+        assert_eq!(o.wt_key, Some(PathBuf::from("certs/server.key")));
+
+        assert!(parse(&args(&["--webtransport-port", "27017", "--wt-cert", "only.pem"])).is_err());
+        assert!(parse(&args(&["--webtransport-port", "27017", "--wt-key", "only.key"])).is_err());
+        assert!(parse(&args(&["--wt-cert", "c.pem", "--wt-key", "k.pem"])).is_err());
+    }
+
+    #[test]
+    fn server_info_endpoint_exposes_webtransport_metadata_without_auth() {
+        let (http_tx, http_rx) = mpsc::channel::<PendingHttpRequest>();
+        let http_hook = make_http_hook(http_tx, None, true);
+        let ws_srv = WsServerTransport::bind(WsServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            static_dir: None,
+            ws_path: "/ws".into(),
+            max_clients: 8,
+            upgrade_hook: None,
+            http_hook: Some(http_hook),
+        })
+        .unwrap();
+        let http_addr = ws_srv.local_addr();
+
+        let wt_srv = WtServerTransport::bind(WtServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            wt_path: "/wt".into(),
+            max_clients: 8,
+            ..WtServerConfig::default()
+        })
+        .unwrap();
+        let wt_port = wt_srv.local_addr().port();
+        let digest = wt_srv.cert_sha256();
+        let expected_b64 = digest.to_base64();
+        let expected_hex = digest.to_colon_hex();
+
+        let mut server = Server::new(
+            ServerConfig {
+                hostname: "WT Discovery Server".into(),
+                max_clients: 8,
+                ..ServerConfig::default()
+            },
+            ServerMap::stub("de_dust2"),
+            WalkGame::new(MoveParams::default()),
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+        server.set_cvar("rcon_password", "top-secret-rcon");
+
+        let mut runtime = Phase13Runtime::new(
+            "de_dust2",
+            0,
+            0.0,
+            27015,
+            Some(http_addr.port()),
+            vec!["de_dust2".into()],
+            None,
+        );
+        runtime.set_webtransport(Some(WebTransportInfo {
+            port: wt_port,
+            path: "/wt".to_string(),
+            cert_sha256_base64: expected_b64.clone(),
+            cert_sha256_hex: expected_hex.clone(),
+            self_signed: true,
+        }));
+
+        let running = Arc::new(AtomicBool::new(true));
+        let run_flag = Arc::clone(&running);
+        let handle = std::thread::spawn(move || {
+            let mut multi = MultiTransport::new();
+            multi.add(PeerKind::Web, ws_srv);
+            multi.add(PeerKind::WebTransport, wt_srv);
+            let mut load = |name: &str| Ok(ServerMap::stub(name));
+            let mut t = 0.0;
+            while run_flag.load(Ordering::Relaxed) {
+                t += 0.01;
+                server.frame(&mut multi, t);
+                let _ = process_pending_http(&http_rx, &mut server, &mut runtime, t, &mut load);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        let raw_resp = tcp_http_request(
+            http_addr,
+            &format!("GET /api/server-info HTTP/1.1\r\nHost: localhost:{}\r\n\r\n", http_addr.port()),
+        );
+        running.store(false, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        let text = String::from_utf8(raw_resp).unwrap();
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+        assert!(text.contains("Access-Control-Allow-Origin: *"), "{text}");
+        assert!(text.contains("\"hostname\":\"WT Discovery Server\""), "{text}");
+        assert!(text.contains(&format!("\"port\":{wt_port}")), "{text}");
+        assert!(
+            text.contains(&format!("\"url\":\"https://localhost:{wt_port}/wt\"")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("\"cert_sha256_base64\":\"{expected_b64}\"")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("\"cert_sha256_hex\":\"{expected_hex}\"")),
+            "{text}"
+        );
+        assert!(text.contains("\"self_signed\":true"), "{text}");
+    }
+
+    #[test]
+    fn udp_websocket_and_webtransport_clients_exchange_oob_and_play_together() {
+        use cs_clientcore::{ConnState, Connection, ConnectionConfig};
+        use cs_proto48::crypto::md5_hex;
+        use cs_proto48::query::{A2sInfoReply, decode_a2s_info_reply, encode_a2s_info_request};
+        use cs_transport::{WsClientTransport, WtClientTransport};
+
+        let udp = UdpTransport::bind("127.0.0.1:0").unwrap();
+        let udp_addr = udp.local_addr();
+        let ws_srv = WsServerTransport::bind(WsServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            static_dir: None,
+            ws_path: "/ws".into(),
+            max_clients: 8,
+            upgrade_hook: None,
+            http_hook: None,
+        })
+        .unwrap();
+        let ws_addr = ws_srv.local_addr();
+        let wt_srv = WtServerTransport::bind(WtServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            wt_path: "/wt".into(),
+            max_clients: 8,
+            ..WtServerConfig::default()
+        })
+        .unwrap();
+        let wt_addr = wt_srv.local_addr();
+        let wt_digest = wt_srv.cert_sha256();
+        let wt_url = format!("https://127.0.0.1:{}/wt", wt_addr.port());
+
+        let mut multi = MultiTransport::new();
+        multi.add(PeerKind::Udp, udp);
+        multi.add(PeerKind::Web, ws_srv);
+        multi.add(PeerKind::WebTransport, wt_srv);
+
+        let mut server = Server::new(
+            ServerConfig {
+                hostname: "CS16 WebTransport Arena".into(),
+                max_clients: 8,
+                ..ServerConfig::default()
+            },
+            ServerMap::stub("de_dust2"),
+            WalkGame::new(MoveParams::default()),
+            DeltaRegistry::cs16_default(),
+            CVarRegistry::new_with_defaults(),
+        );
+
+        // 1. Verify Protocol 48 OOB (A2S_INFO with challenge flow) + malformed OOB resilience over WebTransport.
+        let mut probe_wt = WtClientTransport::connect_with_cert_hash(&wt_url, wt_digest).unwrap();
+        probe_wt
+            .send(PeerAddr::WebTransport(0), b"\xff\xff\xff\xffMALFORMED_OOB")
+            .unwrap();
+        probe_wt
+            .send(PeerAddr::WebTransport(0), &encode_a2s_info_request(None))
+            .unwrap();
+
+        let mut now = 0.0;
+        let mut parsed_info = None;
+        for _ in 0..400 {
+            now += 0.01;
+            server.frame(&mut multi, now);
+            if let Some((_, pkt)) = probe_wt.recv() {
+                match decode_a2s_info_reply(&pkt, &wt_url, 0).expect("valid A2S_INFO reply") {
+                    A2sInfoReply::Challenge(ch) => {
+                        probe_wt
+                            .send(
+                                PeerAddr::WebTransport(0),
+                                &encode_a2s_info_request(Some(ch)),
+                            )
+                            .unwrap();
+                    }
+                    A2sInfoReply::Info(info) => {
+                        parsed_info = Some(info);
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let parsed_info = parsed_info.expect("WebTransport client must receive S2A_INFO response");
+        assert_eq!(parsed_info.name, "CS16 WebTransport Arena");
+        assert_eq!(parsed_info.map, "de_dust2");
+        drop(probe_wt);
+
+        // 2. Verify full Protocol 48 NetChan signon simultaneously across UDP, WebSocket, and WebTransport.
+        let mut udp_conn = Connection::new(
+            UdpTransport::bind("127.0.0.1:0").unwrap(),
+            PeerAddr::Udp(udp_addr),
+            ConnectionConfig::new("udp-player", 76_561_197_960_265_740, &md5_hex(b"udp")),
+        );
+        let mut ws_conn = Connection::new(
+            WsClientTransport::connect(&format!("ws://{ws_addr}/ws")).unwrap(),
+            PeerAddr::Web(0),
+            ConnectionConfig::new("ws-player", 76_561_197_960_265_741, &md5_hex(b"ws")),
+        );
+        let mut wt_conn = Connection::new(
+            WtClientTransport::connect_with_cert_hash(&wt_url, wt_digest).unwrap(),
+            PeerAddr::WebTransport(0),
+            ConnectionConfig::new("wt-player", 76_561_197_960_265_742, &md5_hex(b"wt")),
+        );
+        udp_conn.connect();
+        ws_conn.connect();
+        wt_conn.connect();
+
+        for _ in 0..1000 {
+            now += 0.01;
+            udp_conn.pump(now);
+            ws_conn.pump(now);
+            wt_conn.pump(now);
+            server.frame(&mut multi, now);
+            if udp_conn.state() == &ConnState::InGame
+                && ws_conn.state() == &ConnState::InGame
+                && wt_conn.state() == &ConnState::InGame
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(udp_conn.state(), &ConnState::InGame);
+        assert_eq!(ws_conn.state(), &ConnState::InGame);
+        assert_eq!(wt_conn.state(), &ConnState::InGame);
+        assert_eq!(udp_conn.stats().parse_errors, 0);
+        assert_eq!(ws_conn.stats().parse_errors, 0);
+        assert_eq!(wt_conn.stats().parse_errors, 0);
+
+        // Exchange additional active NetChan frames after reaching InGame.
+        let initial_wt_dgrams = wt_conn.stats().datagrams_in;
+        for _ in 0..30 {
+            now += 0.01;
+            udp_conn.pump(now);
+            ws_conn.pump(now);
+            wt_conn.pump(now);
+            server.frame(&mut multi, now);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            wt_conn.stats().datagrams_in > initial_wt_dgrams,
+            "WebTransport client should keep receiving NetChan game frames"
+        );
+        assert_eq!(wt_conn.stats().parse_errors, 0);
     }
 }

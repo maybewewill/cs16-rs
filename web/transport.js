@@ -1,11 +1,115 @@
-// Browser transport adapter: tries WebTransport over HTTPS only if a user supplies an
-// external HTTP/3 proxy, and otherwise connects directly to `cs-server`'s RFC 6455 WebSocket
-// endpoint (`cs-server` itself serves WebSocket only; see `docs/parity/web.toml`).
+// Browser transport adapter: prefers HTTP/3 WebTransport datagrams (using explicit
+// `serverCertificateHashes` or auto-discovery from `cs-server`'s `/api/server-info`)
+// and falls back transparently to RFC 6455 WebSocket if unavailable or rejected.
+export const MAX_WEBTRANSPORT_PACKET_BYTES = 4010;
+
+export function decodeCertSha256(value) {
+  if (!value) return null;
+  if (value instanceof Uint8Array) {
+    return value.byteLength === 32 ? value : null;
+  }
+  if (value instanceof ArrayBuffer) {
+    return value.byteLength === 32 ? new Uint8Array(value) : null;
+  }
+  if (ArrayBuffer.isView(value)) {
+    return value.byteLength === 32
+      ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+      : null;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  // Colon-separated or plain 64-char hex digest.
+  const compactHex = trimmed.replace(/[:\-\s]/g, '');
+  if (/^[0-9a-fA-F]{64}$/.test(compactHex)) {
+    const out = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+      out[i] = parseInt(compactHex.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  // Standard or URL-safe Base64 encoding of 32 bytes.
+  const normB64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normB64.length % 4 === 0
+    ? normB64
+    : normB64 + '='.repeat(4 - (normB64.length % 4));
+  try {
+    if (typeof atob === 'function') {
+      const bin = atob(padded);
+      if (bin.length !== 32) return null;
+      const out = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) {
+        out[i] = bin.charCodeAt(i);
+      }
+      return out;
+    }
+    if (typeof Buffer !== 'undefined') {
+      const buf = Buffer.from(padded, 'base64');
+      return buf.length === 32 ? new Uint8Array(buf) : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function normalizeServerCertificateHashes(input) {
+  if (!input) return [];
+  const list = Array.isArray(input) ? input : [input];
+  const out = [];
+  for (const item of list) {
+    const raw = item && typeof item === 'object' && !(item instanceof Uint8Array) && !(item instanceof ArrayBuffer) && !ArrayBuffer.isView(item)
+      ? item.value
+      : item;
+    const bytes = decodeCertSha256(raw);
+    if (bytes) {
+      out.push({ algorithm: 'sha-256', value: bytes });
+    }
+  }
+  return out;
+}
+
+function deriveServerInfoUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol === 'ws:') {
+      return `http://${parsed.host}/api/server-info`;
+    }
+    if (parsed.protocol === 'wss:') {
+      return `https://${parsed.host}/api/server-info`;
+    }
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return `${parsed.origin}/api/server-info`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export class WebGameTransport {
-  constructor(url, { onPacket, onStateChange } = {}) {
+  constructor(
+    url,
+    {
+      onPacket,
+      onStateChange,
+      webTransportUrl = null,
+      serverCertificateHashes = null,
+      serverInfoUrl = null,
+      preferWebTransport = true,
+      discoveryTimeoutMs = 1500
+    } = {}
+  ) {
     this.url = url;
     this.onPacket = onPacket || (() => {});
     this.onStateChange = onStateChange || (() => {});
+    this.webTransportUrl = webTransportUrl;
+    this.serverCertificateHashes = serverCertificateHashes;
+    this.serverInfoUrl = serverInfoUrl;
+    this.preferWebTransport = preferWebTransport !== false;
+    this.discoveryTimeoutMs = Math.max(200, Number(discoveryTimeoutMs) || 1500);
     this.kind = null;
     this.ws = null;
     this.wt = null;
@@ -13,13 +117,56 @@ export class WebGameTransport {
     this.closed = false;
   }
 
+  async _discoverWebTransport() {
+    const explicitHashes = normalizeServerCertificateHashes(this.serverCertificateHashes);
+    if (this.webTransportUrl && /^https:\/\//i.test(this.webTransportUrl)) {
+      return { url: this.webTransportUrl, hashes: explicitHashes };
+    }
+    if (/^https:\/\//i.test(this.url)) {
+      return { url: this.url, hashes: explicitHashes };
+    }
+    const infoUrl = this.serverInfoUrl || deriveServerInfoUrl(this.url);
+    if (!infoUrl || typeof fetch === 'undefined') {
+      return null;
+    }
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), this.discoveryTimeoutMs)
+      : null;
+    try {
+      const resp = await fetch(infoUrl, {
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      });
+      if (!resp.ok) return null;
+      const info = await resp.json();
+      const wt = info && info.webtransport;
+      if (!wt || typeof wt.url !== 'string' || !/^https:\/\//i.test(wt.url)) {
+        return null;
+      }
+      let hashes = explicitHashes;
+      if (hashes.length === 0 && wt.self_signed !== false) {
+        const discovered = wt.cert_sha256_base64 || wt.cert_sha256_hex;
+        hashes = normalizeServerCertificateHashes(discovered);
+      }
+      return { url: wt.url, hashes };
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async connect() {
-    if (this.url.startsWith('https://') && typeof WebTransport !== 'undefined') {
-      try {
-        await this._connectWebTransport(this.url);
-        return;
-      } catch (err) {
-        console.warn('WebTransport failed, falling back to WebSocket:', err);
+    if (this.preferWebTransport && typeof WebTransport !== 'undefined') {
+      const candidate = await this._discoverWebTransport();
+      if (candidate && candidate.url) {
+        try {
+          await this._connectWebTransport(candidate.url, candidate.hashes);
+          return;
+        } catch (err) {
+          console.warn('WebTransport failed, falling back to WebSocket:', err);
+        }
       }
     }
     const wsUrl = this.url
@@ -28,13 +175,28 @@ export class WebGameTransport {
     await this._connectWebSocket(wsUrl);
   }
 
-  async _connectWebTransport(url) {
-    const wt = new WebTransport(url);
-    await wt.ready;
+  async _connectWebTransport(url, certHashes = []) {
+    const hashes = normalizeServerCertificateHashes(certHashes);
+    const options = hashes.length > 0 ? { serverCertificateHashes: hashes } : undefined;
+    const wt = options ? new WebTransport(url, options) : new WebTransport(url);
+    try {
+      await wt.ready;
+    } catch (err) {
+      try {
+        wt.close();
+      } catch {}
+      throw err;
+    }
     this.wt = wt;
     this.kind = 'webtransport';
     this.wtWriter = wt.datagrams.writable.getWriter();
     this.onStateChange('connected:webtransport');
+
+    wt.closed.catch(() => {}).finally(() => {
+      if (!this.closed) {
+        this.close();
+      }
+    });
 
     const reader = wt.datagrams.readable.getReader();
     (async () => {
@@ -42,13 +204,16 @@ export class WebGameTransport {
         while (!this.closed) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (value && value.byteLength > 0) {
+          if (value && value.byteLength > 0 && value.byteLength <= MAX_WEBTRANSPORT_PACKET_BYTES) {
             this.onPacket(value instanceof Uint8Array ? value : new Uint8Array(value));
           }
         }
       } catch {
         // Ignore read closure when disconnecting cleanly.
       } finally {
+        try {
+          reader.releaseLock();
+        } catch {}
         this.close();
       }
     })();
@@ -87,6 +252,7 @@ export class WebGameTransport {
   send(bytes) {
     if (this.closed) return;
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (u8.byteLength === 0 || u8.byteLength > MAX_WEBTRANSPORT_PACKET_BYTES) return;
     if (this.kind === 'webtransport' && this.wtWriter) {
       this.wtWriter.write(u8).catch(() => {});
     } else if (this.kind === 'websocket' && this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -97,6 +263,10 @@ export class WebGameTransport {
   close() {
     if (this.closed) return;
     this.closed = true;
+    try {
+      this.wtWriter?.releaseLock?.();
+    } catch {}
+    this.wtWriter = null;
     try {
       this.ws?.close();
     } catch {}

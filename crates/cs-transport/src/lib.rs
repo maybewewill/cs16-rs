@@ -1,6 +1,6 @@
 //! Packet transport seam: every component exchanges raw datagrams through
 //! [`PacketTransport`], so the same code runs over UDP, an in-process loopback,
-//! a browser channel, or RFC 6455 WebSocket.
+//! a browser channel, RFC 6455 WebSocket, or HTTP/3 WebTransport datagrams.
 
 use std::fmt;
 
@@ -12,6 +12,8 @@ mod udp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ws_native;
 pub mod ws_proto;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wt_native;
 
 pub use channel::{
     ChannelHandle, ChannelTransport, MAX_MULTI_PEER_SLOTS, MultiPeerChannel, MultiPeerHandle,
@@ -24,6 +26,10 @@ pub use udp::UdpTransport;
 pub use ws_native::{
     HttpHook, UpgradeHook, WsClientTransport, WsServerConfig, WsServerTransport,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use wt_native::{
+    WtCertDigest, WtClientTransport, WtServerConfig, WtServerTransport,
+};
 
 /// Largest datagram a transport accepts for sending (`ReHLDS rehlds/engine/net.h:117`).
 pub const MAX_UDP_PACKET: usize = 4010;
@@ -34,8 +40,10 @@ pub enum PeerAddr {
     Udp(std::net::SocketAddr),
     /// Loopback peer; `0` is the hub (server), endpoints are numbered from `1`.
     Loopback(u32),
-    /// Browser / WebSocket / WebTransport peer (`0` for the remote server from a client).
+    /// Browser / WebSocket / WebRTC peer (`0` for the remote server from a client).
     Web(u32),
+    /// HTTP/3 WebTransport datagram peer (`0` for the remote server from a client).
+    WebTransport(u32),
 }
 
 impl fmt::Display for PeerAddr {
@@ -44,6 +52,7 @@ impl fmt::Display for PeerAddr {
             PeerAddr::Udp(addr) => write!(f, "{addr}"),
             PeerAddr::Loopback(id) => write!(f, "loopback:{id}"),
             PeerAddr::Web(id) => write!(f, "web:{id}"),
+            PeerAddr::WebTransport(id) => write!(f, "wt:{id}"),
         }
     }
 }
@@ -83,5 +92,7 @@ mod tests {
         let udp: std::net::SocketAddr = "127.0.0.1:27015".parse().unwrap();
         assert_eq!(PeerAddr::Udp(udp).to_string(), "127.0.0.1:27015");
         assert_eq!(PeerAddr::Loopback(3).to_string(), "loopback:3");
+        assert_eq!(PeerAddr::Web(4).to_string(), "web:4");
+        assert_eq!(PeerAddr::WebTransport(5).to_string(), "wt:5");
     }
 }

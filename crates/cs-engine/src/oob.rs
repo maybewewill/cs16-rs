@@ -216,6 +216,7 @@ enum QueryIpKey {
     Ip(IpAddr),
     Loopback(u32),
     Web(u32),
+    WebTransport(u32),
 }
 
 impl QueryIpKey {
@@ -224,6 +225,7 @@ impl QueryIpKey {
             PeerAddr::Udp(sa) => Self::Ip(sa.ip()),
             PeerAddr::Loopback(id) => Self::Loopback(*id),
             PeerAddr::Web(id) => Self::Web(*id),
+            PeerAddr::WebTransport(id) => Self::WebTransport(*id),
         }
     }
 }

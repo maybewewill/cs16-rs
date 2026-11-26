@@ -48,8 +48,8 @@ evidence = "crates/cs-transport/src/ws_proto.rs::rfc6455_accept_key_matches_stan
 
 [[item]]
 id = "web_transport_webtransport_datagrams"
-status = "missing"
-evidence = "Client side only: web/transport.js WebGameTransport tries WebTransport datagrams on https:// URLs and falls back to WebSocket. No server accepts WebTransport (cs-server/cs-transport have no HTTP/3/QUIC endpoint), so every connection uses WebSocket today"
+status = "tested"
+evidence = "crates/cs-transport/src/wt_native.rs WtServerTransport + WtClientTransport (pure-Rust wtransport + ring, ephemeral 13-day ECDSA P-256 cert + optional PEM loading, per-peer rate limiting, MAX_UDP_PACKET bounds) multiplexed via PeerAddr::WebTransport in MultiTransport; cs-server --webtransport-port/--wt-cert/--wt-key + GET /api/server-info; web/transport.js WebGameTransport serverCertificateHashes auto-discovery with WebSocket fallback; crates/cs-transport/tests/webtransport_datagrams.rs::{ephemeral_ecdsa_p256_cert_meets_w3c_spec_and_rejects_wrong_digest,loads_pem_cert_and_key_files_and_rejects_partial_config,multi_transport_routes_udp_ws_and_webtransport_with_zero_collision,rejects_oversized_empty_and_rate_limited_datagrams_without_stalling}; crates/cs-server/src/proto48.rs::{parses_webtransport_cli_flags_and_validates_cert_key_pairs,server_info_endpoint_exposes_webtransport_metadata_without_auth,udp_websocket_and_webtransport_clients_exchange_oob_and_play_together}"
 
 [[item]]
 id = "web_server_web_port_and_static_hosting"

@@ -110,18 +110,24 @@ function parseInviteParams(search, pageProtocol, pageOrigin = '') {
   const rawRoom = (params.get('room') || '').trim();
   const rawP2p = (params.get('p2p') || '').trim();
   const rawSignal = (params.get('signal') || '').trim();
+  const rawWt = (params.get('wt') || '').trim();
+  const rawWtHash = (params.get('wtHash') || '').trim();
   const room = /^[A-Za-z0-9_-]{1,32}$/.test(rawRoom) ? rawRoom : '';
   const p2pRoom = /^[A-Za-z0-9_-]{1,32}$/.test(rawP2p) ? rawP2p : '';
   const fallbackSignal = /^https?:\/\//i.test(pageOrigin) ? pageOrigin : '';
   const signalOrigin = /^https?:\/\/[A-Za-z0-9._:-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/i.test(rawSignal)
     ? rawSignal.replace(/\/+$/, '')
     : fallbackSignal;
+  const webTransportUrl = /^https:\/\/[A-Za-z0-9._:\[\]-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/i.test(rawWt)
+    ? rawWt
+    : '';
+  const wtCertHash = /^[A-Za-z0-9+/_=:-]{43,96}$/.test(rawWtHash) ? rawWtHash : '';
   if (!rawJoin) {
-    return { wsUrl: '', joinLabel: '', room, p2pRoom, signalOrigin };
+    return { wsUrl: '', joinLabel: '', room, p2pRoom, signalOrigin, webTransportUrl, wtCertHash };
   }
   const scheme = pageProtocol === 'https:' ? 'wss://' : 'ws://';
-  if (/^wss?:\/\/[A-Za-z0-9._:-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/.test(rawJoin)) {
-    return { wsUrl: rawJoin, joinLabel: rawJoin, room, p2pRoom, signalOrigin };
+  if (/^(wss?|https):\/\/[A-Za-z0-9._:\[\]-]+(\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*)?$/i.test(rawJoin)) {
+    return { wsUrl: rawJoin, joinLabel: rawJoin, room, p2pRoom, signalOrigin, webTransportUrl, wtCertHash };
   }
   if (/^[A-Za-z0-9._-]+(:\d{1,5})?$/.test(rawJoin)) {
     return {
@@ -129,10 +135,12 @@ function parseInviteParams(search, pageProtocol, pageOrigin = '') {
       joinLabel: rawJoin,
       room,
       p2pRoom,
-      signalOrigin
+      signalOrigin,
+      webTransportUrl,
+      wtCertHash
     };
   }
-  return { wsUrl: '', joinLabel: '', room, p2pRoom, signalOrigin };
+  return { wsUrl: '', joinLabel: '', room, p2pRoom, signalOrigin, webTransportUrl, wtCertHash };
 }
 
 function closeActiveTransports() {
@@ -153,7 +161,7 @@ function resolveSignalOrigin() {
   return '';
 }
 
-async function connectToWsUrl(url) {
+async function connectToWsUrl(url, transportOpts = {}) {
   const trimmed = String(url || '').trim();
   if (!trimmed) return;
   updateMixedContentHint(trimmed);
@@ -165,9 +173,16 @@ async function connectToWsUrl(url) {
   cs16Web?.unlockAudio?.();
   closeActiveTransports();
   cs16Web?.connectRemote?.();
+  const sameOriginInfo = !hostingMode.isStaticPages
+    && (window.location.protocol === 'http:' || window.location.protocol === 'https:')
+    ? `${window.location.origin}/api/server-info`
+    : null;
   net = new WebGameTransport(trimmed, {
     onPacket: (pkt) => cs16Web?.pushNetPacket?.(pkt),
-    onStateChange: (st) => setStatus(`Net: ${st}`)
+    onStateChange: (st) => setStatus(`Net: ${st}`),
+    webTransportUrl: transportOpts.webTransportUrl || null,
+    serverCertificateHashes: transportOpts.wtCertHash || transportOpts.serverCertificateHashes || null,
+    serverInfoUrl: transportOpts.serverInfoUrl || sameOriginInfo
   });
   await net.connect();
   panelEl?.classList.add('collapsed');
@@ -306,7 +321,10 @@ async function main() {
     const roomNote = invite.room ? ` (room ${invite.room})` : '';
     if (cached > 0) {
       setStatus(`Joining ${invite.joinLabel}${roomNote}...`);
-      connectToWsUrl(invite.wsUrl).catch((err) => {
+      connectToWsUrl(invite.wsUrl, {
+        webTransportUrl: invite.webTransportUrl,
+        wtCertHash: invite.wtCertHash
+      }).catch((err) => {
         setStatus(`Invite connect failed: ${err.message}`);
       });
     } else {

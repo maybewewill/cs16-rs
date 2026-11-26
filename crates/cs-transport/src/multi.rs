@@ -9,6 +9,7 @@ pub enum PeerKind {
     Udp,
     Loopback,
     Web,
+    WebTransport,
 }
 
 impl PeerKind {
@@ -17,6 +18,7 @@ impl PeerKind {
             PeerAddr::Udp(_) => Self::Udp,
             PeerAddr::Loopback(_) => Self::Loopback,
             PeerAddr::Web(_) => Self::Web,
+            PeerAddr::WebTransport(_) => Self::WebTransport,
         }
     }
 }
