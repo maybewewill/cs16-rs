@@ -14,12 +14,13 @@
 //!   `R_StudioCalcBonePosition`, shield hitbox 20);
 //! - animations of another sequence group (`seqgroup != 0`, a `*01.mdl` file) are not read, the
 //!   model is then traced as a box (the CS player models keep theirs in the file);
-//! - the cache of the original (16 poses, kept between frames) lives for one game call here:
-//!   the pellets of one shot, which share a pose, still cost one bone setup, and the result of
-//!   a pose does not depend on the cache.
+//! - the cache (32 poses, inline `[StudioHull; 24]` per entry) persists on `WorldLinks` across
+//!   traces and frames, keyed on full pose state (including `origin`, `angles`, `frame`,
+//!   `sequence`, `controller`, `blending`, `size`, `model`, `model_ptr`, `skip_shield`) so
+//!   `sv_unlag` rewind invalidates automatically and the result never depends on cache state.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::cell::{Ref, RefCell};
+use std::ops::Deref;
 use std::sync::Arc;
 
 use cs_assets::bsp::Plane;
@@ -43,8 +44,10 @@ const STUDIO_YR: i32 = 0x0010;
 const STUDIO_ZR: i32 = 0x0020;
 const STUDIO_TYPES: i32 = 0x7FFF;
 const STUDIO_RLOOP: i32 = 0x8000;
-/// `STUDIO_CACHE_SIZE`.
-const STUDIO_CACHE_SIZE: usize = 16;
+/// Fixed-ring studio hitbox pose cache capacity (covers a full 32-player server within a frame).
+const STUDIO_CACHE_SIZE: usize = 32;
+/// Inline hitbox hull capacity per cached pose (all CS 1.6 models have `<= 21` hitboxes).
+const MAX_INLINE_STUDIO_HULLS: usize = 24;
 /// `SV_StudioShieldHitbox` with `REHLDS_FIXES` (21 without; the same hulls result for the
 /// models of CS, which have 21 hitboxes at most).
 const SHIELD_HITBOX: usize = 20;
@@ -59,8 +62,49 @@ pub(crate) struct StudioHull {
     pub(crate) group: i32,
 }
 
+impl StudioHull {
+    #[inline]
+    fn empty() -> Self {
+        Self {
+            hull: BoxHull::from_planes([Plane {
+                normal: Vec3::Z,
+                dist: 0.0,
+                plane_type: PLANE_NOT_AXIAL,
+            }; 6]),
+            group: 0,
+        }
+    }
+}
+
+/// Inline hitbox hull array for a posed studio model (`0` heap allocations for every model with
+/// `<= 24` hitboxes, including all CS 1.6 players and hostages; falls back to `Arc<[StudioHull]>`
+/// for custom models with more than 24 hitboxes).
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum StudioHullSet {
+    Inline {
+        hulls: [StudioHull; MAX_INLINE_STUDIO_HULLS],
+        len: u8,
+    },
+    Overflow(Arc<[StudioHull]>),
+}
+
+impl Deref for StudioHullSet {
+    type Target = [StudioHull];
+
+    #[inline]
+    fn deref(&self) -> &[StudioHull] {
+        match self {
+            Self::Inline { hulls, len } => &hulls[..usize::from(*len)],
+            Self::Overflow(arc) => arc,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct CacheEntry {
     model: u16,
+    model_ptr: usize,
     frame: f32,
     sequence: i32,
     angles: Vec3,
@@ -72,26 +116,54 @@ struct CacheEntry {
     /// one without (and the other way round) until it is flushed; here it is in the key.
     skip_shield: bool,
     /// `None`: the pose could not be made (also remembered, so a model that cannot be posed
-    /// costs one attempt per pose and call).
-    hulls: Option<Rc<[StudioHull]>>,
+    /// costs one attempt per pose).
+    hulls: Option<StudioHullSet>,
 }
 
-/// `rgStudioCache`.
+impl CacheEntry {
+    fn empty() -> Self {
+        Self {
+            model: 0,
+            model_ptr: 0,
+            frame: 0.0,
+            sequence: 0,
+            angles: Vec3::ZERO,
+            origin: Vec3::ZERO,
+            size: Vec3::ZERO,
+            controller: [0; 4],
+            blending: [0; 2],
+            skip_shield: false,
+            hulls: None,
+        }
+    }
+}
+
+/// Persistent 32-entry fixed-ring `rgStudioCache` stored on [`crate::world::WorldLinks`].
+/// Backed by a single heap slab allocated once (`capacity == 32`) so `WorldLinks` / `Server` stay
+/// small on the stack while every pose with `<= 24` hitboxes requires zero per-miss allocations
+/// and cache hits borrow `&[StudioHull]` directly with zero copies.
 #[derive(Default)]
 pub(crate) struct StudioCache {
     entries: Vec<CacheEntry>,
-    /// Slot the next entry goes to once the cache is full.
+    /// Slot the next entry overwrites once `entries.len() == STUDIO_CACHE_SIZE`.
     next: usize,
     /// Bone setups done (the cache misses): the work the traces cost.
     setups: usize,
+    /// Reusable bone-evaluation scratch buffers to avoid per-miss heap allocations.
+    q1: Vec<[f32; 4]>,
+    pos1: Vec<[f32; 3]>,
+    q2: Vec<[f32; 4]>,
+    pos2: Vec<[f32; 3]>,
+    transforms: Vec<Mat34>,
 }
 
 impl StudioCache {
     /// `R_CheckStudioCache`: the keys are compared exactly (`VectorCompare`, `memcmp`).
     #[allow(clippy::too_many_arguments)]
-    fn check(
+    fn find_index(
         &self,
         model: u16,
+        model_ptr: usize,
         frame: f32,
         sequence: i32,
         angles: Vec3,
@@ -100,31 +172,134 @@ impl StudioCache {
         controller: [u8; 4],
         blending: [u8; 2],
         skip_shield: bool,
-    ) -> Option<Option<Rc<[StudioHull]>>> {
-        self.entries
-            .iter()
-            .find(|c| {
-                c.skip_shield == skip_shield
-                    && c.model == model
-                    && c.frame == frame
-                    && c.sequence == sequence
-                    && c.angles == angles
-                    && c.origin == origin
-                    && c.size == size
-                    && c.controller == controller
-                    && c.blending == blending
-            })
-            .map(|c| c.hulls.clone())
+    ) -> Option<usize> {
+        self.entries.iter().position(|c| {
+            c.skip_shield == skip_shield
+                && c.model == model
+                && c.model_ptr == model_ptr
+                && c.frame == frame
+                && c.sequence == sequence
+                && c.angles == angles
+                && c.origin == origin
+                && c.size == size
+                && c.controller == controller
+                && c.blending == blending
+        })
     }
 
-    /// `R_AddToStudioCache`.
-    fn add(&mut self, entry: CacheEntry) {
+    /// Allocates or claims the next fixed-ring slot (`0..STUDIO_CACHE_SIZE`) without ever growing
+    /// past `STUDIO_CACHE_SIZE`.
+    fn alloc_slot(&mut self) -> usize {
         if self.entries.len() < STUDIO_CACHE_SIZE {
-            self.entries.push(entry);
+            if self.entries.capacity() == 0 {
+                self.entries.reserve_exact(STUDIO_CACHE_SIZE);
+            }
+            let idx = self.entries.len();
+            self.entries.push(CacheEntry::empty());
+            idx
         } else {
-            self.entries[self.next] = entry;
+            let idx = self.next;
             self.next = (self.next + 1) % STUDIO_CACHE_SIZE;
+            idx
         }
+    }
+
+    /// Evaluates bone transforms and populates the next ring slot in place (`R_StudioHull` +
+    /// `R_AddToStudioCache`), returning the slot index.
+    #[allow(clippy::too_many_arguments)]
+    fn build_and_insert(
+        &mut self,
+        cache_model: u16,
+        model_ptr: usize,
+        model: &StudioPoseData,
+        frame: f32,
+        sequence: i32,
+        angles: Vec3,
+        origin: Vec3,
+        size: Vec3,
+        controller: [u8; 4],
+        blending: [u8; 2],
+        skip_shield: bool,
+    ) -> usize {
+        let angles2 = Vec3::new(-angles.x, angles.y, angles.z);
+        let posed = setup_bones_into(
+            self, model, frame, sequence, angles2, origin, controller, blending,
+        )
+        .is_some();
+        self.setups += 1;
+
+        let slot = self.alloc_slot();
+        let entry = &mut self.entries[slot];
+        entry.model = cache_model;
+        entry.model_ptr = model_ptr;
+        entry.frame = frame;
+        entry.sequence = sequence;
+        entry.angles = angles;
+        entry.origin = origin;
+        entry.size = size;
+        entry.controller = controller;
+        entry.blending = blending;
+        entry.skip_shield = skip_shield;
+
+        if !posed {
+            entry.hulls = None;
+            return slot;
+        }
+
+        let expected = model.hitboxes.len()
+            - usize::from(skip_shield && model.hitboxes.len() > SHIELD_HITBOX);
+        let transforms = &self.transforms;
+        if expected <= MAX_INLINE_STUDIO_HULLS {
+            if !matches!(entry.hulls, Some(StudioHullSet::Inline { .. })) {
+                entry.hulls = Some(StudioHullSet::Inline {
+                    hulls: [StudioHull::empty(); MAX_INLINE_STUDIO_HULLS],
+                    len: 0,
+                });
+            }
+            let ok = if let Some(StudioHullSet::Inline { hulls, len }) = &mut entry.hulls {
+                let mut count = 0usize;
+                let mut valid = true;
+                for (i, hitbox) in model.hitboxes.iter().enumerate() {
+                    if skip_shield && i == SHIELD_HITBOX {
+                        continue;
+                    }
+                    let Some(bone) = transforms.get(hitbox.bone) else {
+                        valid = false;
+                        break;
+                    };
+                    hulls[count] = make_studio_hull(bone, hitbox.bbmin, hitbox.bbmax, size, hitbox.group);
+                    count += 1;
+                }
+                *len = count as u8;
+                valid
+            } else {
+                false
+            };
+            if !ok {
+                entry.hulls = None;
+            }
+        } else {
+            let mut hulls = Vec::with_capacity(expected);
+            let mut valid = true;
+            for (i, hitbox) in model.hitboxes.iter().enumerate() {
+                if skip_shield && i == SHIELD_HITBOX {
+                    continue;
+                }
+                let Some(bone) = transforms.get(hitbox.bone) else {
+                    valid = false;
+                    break;
+                };
+                hulls.push(make_studio_hull(
+                    bone,
+                    hitbox.bbmin,
+                    hitbox.bbmax,
+                    size,
+                    hitbox.group,
+                ));
+            }
+            entry.hulls = valid.then(|| StudioHullSet::Overflow(hulls.into()));
+        }
+        slot
     }
 }
 
@@ -428,11 +603,9 @@ fn calc_bone_position(
     Some(pos)
 }
 
-/// `SV_StudioSetupBones` for the whole model (`iBone` -1): the transform of every bone.
-/// `None` for a model without sequences, one whose sequence keeps its animations in another
-/// file, or a frame or animation data that is out of range (the original would read memory
-/// there). A sequence out of range is sequence 0, as in the source.
-pub(crate) fn setup_bones(
+#[allow(clippy::too_many_arguments)]
+fn setup_bones_into(
+    cache: &mut StudioCache,
     model: &StudioPoseData,
     frame: f32,
     sequence: i32,
@@ -440,7 +613,7 @@ pub(crate) fn setup_bones(
     origin: Vec3,
     controller: [u8; 4],
     blending: [u8; 2],
-) -> Option<Vec<Mat34>> {
+) -> Option<()> {
     let sequence = usize::try_from(sequence)
         .ok()
         .filter(|&s| s < model.sequences.len())
@@ -463,50 +636,73 @@ pub(crate) fn setup_bones(
     }
     let s = f - whole as f32;
 
-    let mut q1 = vec![[0.0f32; 4]; num_bones];
-    let mut pos1 = vec![[0.0f32; 3]; num_bones];
+    cache.q1.clear();
+    cache.q1.resize(num_bones, [0.0f32; 4]);
+    cache.pos1.clear();
+    cache.pos1.resize(num_bones, [0.0f32; 3]);
     for (bone, raw) in model.bones.iter().enumerate() {
         let anim = model.anim_entry(seq.animindex, bone)?;
-        q1[bone] = calc_bone_quaternion(model, whole, s, raw, anim, &adj)?;
-        pos1[bone] = calc_bone_position(model, whole, s, raw, anim, &adj)?;
+        cache.q1[bone] = calc_bone_quaternion(model, whole, s, raw, anim, &adj)?;
+        cache.pos1[bone] = calc_bone_position(model, whole, s, raw, anim, &adj)?;
     }
 
     if seq.numblends > 1 {
         let second = seq.animindex.checked_add(num_bones.checked_mul(12)?)?;
-        let mut q2 = vec![[0.0f32; 4]; num_bones];
-        let mut pos2 = vec![[0.0f32; 3]; num_bones];
+        cache.q2.clear();
+        cache.q2.resize(num_bones, [0.0f32; 4]);
+        cache.pos2.clear();
+        cache.pos2.resize(num_bones, [0.0f32; 3]);
         for (bone, raw) in model.bones.iter().enumerate() {
             let anim = model.anim_entry(second, bone)?;
-            q2[bone] = calc_bone_quaternion(model, whole, s, raw, anim, &adj)?;
-            pos2[bone] = calc_bone_position(model, whole, s, raw, anim, &adj)?;
+            cache.q2[bone] = calc_bone_quaternion(model, whole, s, raw, anim, &adj)?;
+            cache.pos2[bone] = calc_bone_position(model, whole, s, raw, anim, &adj)?;
         }
         // `R_StudioSlerpBones` with `*pblending / 255.0f`.
         let w = (f32::from(blending[0]) / 255.0).clamp(0.0, 1.0);
         let w1 = 1.0 - w;
         for i in 0..num_bones {
-            q1[i] = quaternion_slerp(q1[i], q2[i], w);
+            cache.q1[i] = quaternion_slerp(cache.q1[i], cache.q2[i], w);
             for c in 0..3 {
-                pos1[i][c] = pos1[i][c] * w1 + pos2[i][c] * w;
+                cache.pos1[i][c] = cache.pos1[i][c] * w1 + cache.pos2[i][c] * w;
             }
         }
     }
 
     let rotation = angle_matrix(angles, origin);
-    let mut transforms: Vec<Mat34> = Vec::with_capacity(num_bones);
+    cache.transforms.clear();
+    cache.transforms.reserve(num_bones);
     for (bone, raw) in model.bones.iter().enumerate() {
-        let mut m = quaternion_matrix(q1[bone]);
-        m[0][3] = pos1[bone][0];
-        m[1][3] = pos1[bone][1];
-        m[2][3] = pos1[bone][2];
+        let mut m = quaternion_matrix(cache.q1[bone]);
+        m[0][3] = cache.pos1[bone][0];
+        m[1][3] = cache.pos1[bone][1];
+        m[2][3] = cache.pos1[bone][2];
         let parent = usize::try_from(raw.parent).ok();
         let out = match parent {
             None => concat_transforms(&rotation, &m),
             // Parents come first (checked when the model was read).
-            Some(p) => concat_transforms(transforms.get(p)?, &m),
+            Some(p) => concat_transforms(cache.transforms.get(p)?, &m),
         };
-        transforms.push(out);
+        cache.transforms.push(out);
     }
-    Some(transforms)
+    Some(())
+}
+
+/// `SV_StudioSetupBones` for the whole model (`iBone` -1): the transform of every bone.
+/// `None` for a model without sequences, one whose sequence keeps its animations in another
+/// file, or a frame or animation data that is out of range (the original would read memory
+/// there). A sequence out of range is sequence 0, as in the source.
+pub(crate) fn setup_bones(
+    model: &StudioPoseData,
+    frame: f32,
+    sequence: i32,
+    angles: Vec3,
+    origin: Vec3,
+    controller: [u8; 4],
+    blending: [u8; 2],
+) -> Option<Vec<Mat34>> {
+    let mut tmp = StudioCache::default();
+    setup_bones_into(&mut tmp, model, frame, sequence, angles, origin, controller, blending)?;
+    Some(tmp.transforms)
 }
 
 /// `SV_SetStudioHullPlane`.
@@ -519,52 +715,35 @@ fn hull_plane(bone: &Mat34, k: usize, dist: f32) -> Plane {
     }
 }
 
-/// `R_StudioHull` without the cache: the hull of each hitbox (the shield's left out when
-/// `skip_shield`), grown by `size`. `angles` are the entity's, whose pitch the bones take
-/// the other way round. `None` when the pose cannot be made.
-#[allow(clippy::too_many_arguments)]
-fn build_hulls(
-    model: &StudioPoseData,
-    frame: f32,
-    sequence: i32,
-    angles: Vec3,
-    origin: Vec3,
+/// Builds a single world-space hitbox `StudioHull` grown by `size` from its bone transform.
+fn make_studio_hull(
+    bone: &Mat34,
+    bbmin: Vec3,
+    bbmax: Vec3,
     size: Vec3,
-    controller: [u8; 4],
-    blending: [u8; 2],
-    skip_shield: bool,
-) -> Option<Vec<StudioHull>> {
-    let angles2 = Vec3::new(-angles.x, angles.y, angles.z);
-    let bones = setup_bones(model, frame, sequence, angles2, origin, controller, blending)?;
-    let mut hulls = Vec::with_capacity(model.hitboxes.len());
-    for (i, hitbox) in model.hitboxes.iter().enumerate() {
-        if skip_shield && i == SHIELD_HITBOX {
-            continue;
-        }
-        let bone = bones.get(hitbox.bone)?;
-        let mut planes = [Plane {
-            normal: Vec3::Z,
-            dist: 0.0,
-            plane_type: PLANE_NOT_AXIAL,
-        }; 6];
-        for j in 0..3 {
-            let mut plane0 = hull_plane(bone, j, hitbox.bbmax[j]);
-            let mut plane1 = hull_plane(bone, j, hitbox.bbmin[j]);
-            plane0.dist += (plane0.normal.x * size.x).abs()
-                + (plane0.normal.y * size.y).abs()
-                + (plane0.normal.z * size.z).abs();
-            plane1.dist -= (plane1.normal.x * size.x).abs()
-                + (plane1.normal.y * size.y).abs()
-                + (plane1.normal.z * size.z).abs();
-            planes[j * 2] = plane0;
-            planes[j * 2 + 1] = plane1;
-        }
-        hulls.push(StudioHull {
-            hull: BoxHull::from_planes(planes),
-            group: hitbox.group,
-        });
+    group: i32,
+) -> StudioHull {
+    let mut planes = [Plane {
+        normal: Vec3::Z,
+        dist: 0.0,
+        plane_type: PLANE_NOT_AXIAL,
+    }; 6];
+    for j in 0..3 {
+        let mut plane0 = hull_plane(bone, j, bbmax[j]);
+        let mut plane1 = hull_plane(bone, j, bbmin[j]);
+        plane0.dist += (plane0.normal.x * size.x).abs()
+            + (plane0.normal.y * size.y).abs()
+            + (plane0.normal.z * size.z).abs();
+        plane1.dist -= (plane1.normal.x * size.x).abs()
+            + (plane1.normal.y * size.y).abs()
+            + (plane1.normal.z * size.z).abs();
+        planes[j * 2] = plane0;
+        planes[j * 2 + 1] = plane1;
     }
-    Some(hulls)
+    StudioHull {
+        hull: BoxHull::from_planes(planes),
+        group,
+    }
 }
 
 /// `R_StudioPlayerBlend`: the blend weight (0..=255 for a pitch inside the sequence's range)
@@ -621,7 +800,7 @@ impl EngineApi<'_> {
         origin: Vec3,
         mins: Vec3,
         maxs: Vec3,
-    ) -> Option<Rc<[StudioHull]>> {
+    ) -> Option<Ref<'_, [StudioHull]>> {
         let is_client = v.flags & FL_CLIENT != 0;
         let mut size = maxs - mins;
         let mut use_complex = false;
@@ -666,8 +845,10 @@ impl EngineApi<'_> {
         let sequence = i32::from(v.sequence);
 
         let cache_model = v.modelindex;
-        if let Some(hit) = self.studio_cache.borrow().check(
+        let model_ptr = std::ptr::from_ref(model) as usize;
+        let hit_idx = self.world.studio_cache.borrow().find_index(
             cache_model,
+            model_ptr,
             v.frame,
             sequence,
             angles,
@@ -676,28 +857,31 @@ impl EngineApi<'_> {
             controller,
             blending,
             skip_shield,
-        ) {
-            return hit;
-        }
-        let hulls: Option<Rc<[StudioHull]>> = build_hulls(
-            model, v.frame, sequence, angles, origin, size, controller, blending, skip_shield,
-        )
-        .map(Into::into);
-        let mut cache = self.studio_cache.borrow_mut();
-        cache.setups += 1;
-        cache.add(CacheEntry {
-            model: cache_model,
-            frame: v.frame,
-            sequence,
-            angles,
-            origin,
-            size,
-            controller,
-            blending,
-            skip_shield,
-            hulls: hulls.clone(),
-        });
-        hulls
+        );
+        let idx = match hit_idx {
+            Some(idx) => idx,
+            None => self.world.studio_cache.borrow_mut().build_and_insert(
+                cache_model,
+                model_ptr,
+                model,
+                v.frame,
+                sequence,
+                angles,
+                origin,
+                size,
+                controller,
+                blending,
+                skip_shield,
+            ),
+        };
+        let cache = self.world.studio_cache.borrow();
+        cache.entries[idx].hulls.as_ref()?;
+        Some(Ref::map(cache, |c| {
+            c.entries[idx]
+                .hulls
+                .as_deref()
+                .expect("checked hulls.is_some()")
+        }))
     }
 
     /// `GET_MODEL_PTR`: the studio model with model index `index` (the `modelindex` of an
@@ -771,16 +955,92 @@ impl EngineApi<'_> {
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn studio_setups(&self) -> usize {
-        self.studio_cache.borrow().setups
+        self.world.studio_cache.borrow().setups
     }
 }
 
-/// What [`EngineApi`] holds for the cache.
+/// What [`crate::world::WorldLinks`] holds for the persistent studio pose cache.
 pub(crate) type SharedStudioCache = RefCell<StudioCache>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const _: () = {
+        const fn assert_send<T: Send>() {}
+        assert_send::<StudioCache>();
+        assert_send::<SharedStudioCache>();
+    };
+
+    #[test]
+    fn studio_cache_holds_32_inline_entries_and_invalidates_on_origin_change() {
+        let mut cache = StudioCache::default();
+        assert!(std::mem::size_of::<StudioCache>() <= 256);
+
+        for i in 0..STUDIO_CACHE_SIZE {
+            let slot = cache.alloc_slot();
+            cache.entries[slot] = CacheEntry {
+                model: 2,
+                model_ptr: 0x1000,
+                frame: 0.0,
+                sequence: i as i32,
+                angles: Vec3::ZERO,
+                origin: Vec3::new(i as f32 * 10.0, 0.0, 0.0),
+                size: Vec3::splat(0.5),
+                controller: [0x7F; 4],
+                blending: [0, 0],
+                skip_shield: true,
+                hulls: Some(StudioHullSet::Inline {
+                    hulls: [StudioHull::empty(); MAX_INLINE_STUDIO_HULLS],
+                    len: 20,
+                }),
+            };
+        }
+        assert_eq!(cache.entries.len(), STUDIO_CACHE_SIZE);
+        assert_eq!(cache.entries.capacity(), STUDIO_CACHE_SIZE);
+        for i in 0..STUDIO_CACHE_SIZE {
+            let idx = cache
+                .find_index(
+                    2,
+                    0x1000,
+                    0.0,
+                    i as i32,
+                    Vec3::ZERO,
+                    Vec3::new(i as f32 * 10.0, 0.0, 0.0),
+                    Vec3::splat(0.5),
+                    [0x7F; 4],
+                    [0, 0],
+                    true,
+                )
+                .expect("cache hit");
+            assert!(matches!(
+                cache.entries[idx].hulls,
+                Some(StudioHullSet::Inline { len: 20, .. })
+            ));
+        }
+        // Origin change (e.g. `sv_unlag` rewind) misses immediately.
+        assert!(
+            cache
+                .find_index(
+                    2,
+                    0x1000,
+                    0.0,
+                    0,
+                    Vec3::ZERO,
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::splat(0.5),
+                    [0x7F; 4],
+                    [0, 0],
+                    true,
+                )
+                .is_none()
+        );
+        // 33rd entry overwrites ring slot 0 without reallocating.
+        let cap = cache.entries.capacity();
+        assert_eq!(cache.alloc_slot(), 0);
+        assert_eq!(cache.entries.len(), STUDIO_CACHE_SIZE);
+        assert_eq!(cache.entries.capacity(), cap);
+    }
 
     #[test]
     fn slerp_of_equal_quaternions_is_that_quaternion() {

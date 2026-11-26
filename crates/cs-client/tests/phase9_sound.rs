@@ -749,3 +749,59 @@ fn classic_audio_defaults_and_resampling_and_sound_list() {
     mixer.mix_frames(&mut out_low);
     assert!(rms(&out_low) > 0.1);
 }
+
+#[test]
+fn lock_free_audio_engine_predecodes_and_warms_signon_precache() {
+    use cs_client::audio::AudioEngine;
+    use cs_clientcore::{PrecacheEntry, PrecacheTables};
+
+    let (mut engine, mut offline) = AudioEngine::new_offline();
+    let ak_wav = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 440.0, 2_205, 0.7), None, None);
+    let step_wav = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 260.0, 2_205, 0.6), None, None);
+    let ui_wav = encode_test_wav_pcm16(22_050, 1, &sine_i16(22_050, 880.0, 1_100, 0.5), None, None);
+
+    let vfs = Vfs::from_memory([
+        ("sound/weapons/ak47-1.wav".to_string(), ak_wav),
+        ("sound/player/pl_step1.wav".to_string(), step_wav),
+        ("sound/ui/buttonclick.wav".to_string(), ui_wav),
+    ]);
+    let mut precache = PrecacheTables::default();
+    precache.sounds.insert(
+        1,
+        PrecacheEntry {
+            name: "weapons/ak47-1.wav".to_string(),
+            download_size: 0,
+            flags: 0,
+        },
+    );
+    precache.sounds.insert(
+        2,
+        PrecacheEntry {
+            name: "player/pl_step1.wav".to_string(),
+            download_size: 0,
+            flags: 0,
+        },
+    );
+
+    let warmed = engine.warmup_precache(&vfs, &precache);
+    assert_eq!(warmed, 3);
+    assert!(engine.is_wav_cached("weapons/ak47-1.wav"));
+    assert!(engine.is_wav_cached("player/pl_step1.wav"));
+    assert!(engine.is_wav_cached("ui/buttonclick.wav"));
+
+    // Play without passing VFS: must succeed purely from pre-decoded `Arc<DecodedWav>` cache!
+    engine.set_params(1.0, 0.25, true, 0.0, true, true, 0.5, true, 2.0);
+    engine.play_2d(None, "weapons/ak47-1.wav", 1.0);
+    let mut out = vec![0.0f32; 2048];
+    offline.mix_samples(&mut out);
+    assert!(rms(&out) > 0.1, "pre-decoded sound must mix on audio thread without VFS");
+    assert_eq!(offline.active_channel_counts(), (1, 0));
+
+    // Also verify retail signon warmup if CS 1.6 gamedir is installed.
+    if let Ok(retail_vfs) = Vfs::discover(None, VfsConfig::default()) {
+        let (mut retail_engine, _) = AudioEngine::new_offline();
+        let retail_warmed = retail_engine.warmup_precache(&retail_vfs, &precache);
+        assert!(retail_warmed >= 2, "expected retail ak47/step/ui WAVs warmed, got {retail_warmed}");
+        assert!(retail_engine.is_wav_cached("weapons/ak47-1.wav"));
+    }
+}

@@ -4440,6 +4440,8 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "cs-assets",
+ "cs-client",
  "cs-clientcore",
  "cs-cvar",
  "cs-engine",
@@ -4448,12 +4450,16 @@ dependencies = [
  "cs-mod-api",
  "cs-mod-host",
  "cs-mod-py",
+ "cs-pm",
  "cs-proto48",
  "cs-transport",
  "cs-vfs",
+ "egui",
+ "glam",
  "image",
  "serde",
  "toml",
+ "wgpu",
 ]
 
 [[package]]

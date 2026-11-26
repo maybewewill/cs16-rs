@@ -1,6 +1,7 @@
 //! GoldSrc sprite (`.spr`) renderer across all 5 orientation types and all render modes, with
-//! `WorldCollision` line-of-sight occlusion for `kRenderGlow`, `GL_EXP2` fog,
-//! `gamma`/`texgamma`/`r_software_mode`, `TextureFilterMode`, and MSAA (`1 | 4`).
+//! `WorldCollision` line-of-sight occlusion for `kRenderGlow`, run-length draw-call batching
+//! (45-50 smoke puffs in 1 draw call), `GL_EXP2` fog, `gamma`/`texgamma`/`r_software_mode`,
+//! `TextureFilterMode`, and MSAA (`1 | 4`).
 
 use std::collections::HashMap;
 
@@ -16,8 +17,8 @@ use crate::render::lighting::{
     TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
 };
 use crate::render::scene::{
-    BrushCollider, EntRenderMode, SpriteDraw, ViewBasis, glow_blend, sprite_axes, sprite_quad,
-    trace_glow_occlusion,
+    BrushCollider, EntRenderMode, ModelRegistry, SpriteDraw, ViewBasis, glow_blend, sprite_axes,
+    sprite_quad, trace_glow_occlusion,
 };
 
 #[repr(C)]
@@ -96,15 +97,57 @@ struct GpuSprite {
     frames: Vec<GpuFrame>,
 }
 
-struct PreparedSprite {
-    key: String,
-    frame: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedSpriteBatch {
+    sprite_idx: u32,
+    frame: u32,
     first_vertex: u32,
+    vertex_count: u32,
     blend: SpriteBlend,
 }
 
+fn push_sprite_batch(
+    batches: &mut Vec<PreparedSpriteBatch>,
+    sprite_idx: u32,
+    frame: u32,
+    first_vertex: u32,
+    vertex_count: u32,
+    blend: SpriteBlend,
+) {
+    if let Some(last) = batches.last_mut()
+        && last.blend == blend
+        && last.sprite_idx == sprite_idx
+        && last.frame == frame
+        && last.first_vertex + last.vertex_count == first_vertex
+    {
+        last.vertex_count += vertex_count;
+    } else {
+        batches.push(PreparedSpriteBatch {
+            sprite_idx,
+            frame,
+            first_vertex,
+            vertex_count,
+            blend,
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PreparedSprites {
-    draws: Vec<PreparedSprite>,
+    batch_count: usize,
+    sprite_count: usize,
+}
+
+impl PreparedSprites {
+    /// Number of coalesced GPU draw calls in this prepared sprite pass.
+    pub fn batch_count(&self) -> usize {
+        self.batch_count
+    }
+
+    /// Number of sprite quads emitted across all batches in this pass.
+    pub fn sprite_count(&self) -> usize {
+        self.sprite_count
+    }
 }
 
 pub struct SpriteRenderer {
@@ -120,7 +163,12 @@ pub struct SpriteRenderer {
     uniform_bg: wgpu::BindGroup,
     vertex_buf: wgpu::Buffer,
     vertex_cap: usize,
-    cache: HashMap<String, Option<GpuSprite>>,
+    sprites: Vec<Option<GpuSprite>>,
+    exact_path_to_id: HashMap<String, u32>,
+    lower_path_to_id: HashMap<String, u32>,
+    scratch_verts: Vec<SpriteVertex>,
+    prepared_batches: Vec<PreparedSpriteBatch>,
+    frame_upload_bytes: u64,
 }
 
 fn pipeline_slot(b: SpriteBlend) -> usize {
@@ -307,8 +355,17 @@ impl SpriteRenderer {
             uniform_bg,
             vertex_buf,
             vertex_cap,
-            cache: HashMap::new(),
+            sprites: Vec::new(),
+            exact_path_to_id: HashMap::new(),
+            lower_path_to_id: HashMap::new(),
+            scratch_verts: Vec::new(),
+            prepared_batches: Vec::new(),
+            frame_upload_bytes: 0,
         }
+    }
+
+    pub(crate) fn take_upload_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.frame_upload_bytes)
     }
 
     pub fn rebuild_pipelines(&mut self, device: &wgpu::Device, msaa_samples: u32) {
@@ -338,7 +395,7 @@ impl SpriteRenderer {
         }
         self.filter_mode = clamped_mode;
         self.sampler = create_sampler(device, "sprite_sampler", clamped_mode, 1, true);
-        for (idx, spr) in self.cache.values_mut().flatten().enumerate() {
+        for (idx, spr) in self.sprites.iter_mut().flatten().enumerate() {
             for (fi, f) in spr.frames.iter_mut().enumerate() {
                 f.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(&format!("sprite_bg_{idx}_{fi}")),
@@ -359,7 +416,10 @@ impl SpriteRenderer {
     }
 
     pub fn clear_cache(&mut self) {
-        self.cache.clear();
+        self.sprites.clear();
+        self.exact_path_to_id.clear();
+        self.lower_path_to_id.clear();
+        self.prepared_batches.clear();
     }
 
     fn ensure_loaded(
@@ -368,69 +428,85 @@ impl SpriteRenderer {
         queue: &wgpu::Queue,
         vfs: &Vfs,
         rel_path: &str,
-    ) -> Option<String> {
-        let key = rel_path.to_ascii_lowercase();
-        if !self.cache.contains_key(&key) {
-            let loaded = match GoldSrcSprite::load(vfs, &key) {
-                Ok(spr) if !spr.frames.is_empty() => {
-                    let frames = spr
-                        .frames
-                        .iter()
-                        .map(|f| {
-                            let view = upload_rgba_texture_mipmapped(
-                                device,
-                                queue,
-                                &key,
-                                f.width.max(1),
-                                f.height.max(1),
-                                &f.rgba,
-                            );
-                            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some(&key),
-                                layout: &self.tex_bgl,
-                                entries: &[
-                                    wgpu::BindGroupEntry {
-                                        binding: 0,
-                                        resource: wgpu::BindingResource::TextureView(&view),
-                                    },
-                                    wgpu::BindGroupEntry {
-                                        binding: 1,
-                                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                                    },
-                                ],
-                            });
-                            let (left, right, up, down) =
-                                frame_extents(f.origin_x, f.origin_y, f.width, f.height);
-                            GpuFrame {
-                                left,
-                                right,
-                                up,
-                                down,
-                                view,
-                                bind_group,
-                            }
-                        })
-                        .collect();
-                    Some(GpuSprite {
-                        sprite_type: spr.sprite_type,
-                        frames,
-                    })
-                }
-                Ok(_) => {
-                    warn!(sprite = %key, "Sprite has no frames");
-                    None
-                }
-                Err(err) => {
-                    warn!(sprite = %key, %err, "Could not load sprite");
-                    None
-                }
-            };
-            self.cache.insert(key.clone(), loaded);
+    ) -> Option<u32> {
+        if let Some(&id) = self.exact_path_to_id.get(rel_path) {
+            return self
+                .sprites
+                .get(id as usize)
+                .and_then(|o| o.as_ref())
+                .map(|_| id);
         }
-        self.cache
-            .get(&key)
-            .and_then(|o| o.as_ref())
-            .map(|_| key)
+
+        let lower = rel_path.to_ascii_lowercase();
+        if let Some(&id) = self.lower_path_to_id.get(&lower) {
+            self.exact_path_to_id.insert(rel_path.to_string(), id);
+            return self
+                .sprites
+                .get(id as usize)
+                .and_then(|o| o.as_ref())
+                .map(|_| id);
+        }
+
+        let loaded = match GoldSrcSprite::load(vfs, &lower) {
+            Ok(spr) if !spr.frames.is_empty() => {
+                let frames = spr
+                    .frames
+                    .iter()
+                    .map(|f| {
+                        let view = upload_rgba_texture_mipmapped(
+                            device,
+                            queue,
+                            &lower,
+                            f.width.max(1),
+                            f.height.max(1),
+                            &f.rgba,
+                        );
+                        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some(&lower),
+                            layout: &self.tex_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                },
+                            ],
+                        });
+                        let (left, right, up, down) =
+                            frame_extents(f.origin_x, f.origin_y, f.width, f.height);
+                        GpuFrame {
+                            left,
+                            right,
+                            up,
+                            down,
+                            view,
+                            bind_group,
+                        }
+                    })
+                    .collect();
+                Some(GpuSprite {
+                    sprite_type: spr.sprite_type,
+                    frames,
+                })
+            }
+            Ok(_) => {
+                warn!(sprite = %lower, "Sprite has no frames");
+                None
+            }
+            Err(err) => {
+                warn!(sprite = %lower, %err, "Could not load sprite");
+                None
+            }
+        };
+        let is_some = loaded.is_some();
+        let id = self.sprites.len() as u32;
+        self.sprites.push(loaded);
+        self.lower_path_to_id.insert(lower, id);
+        self.exact_path_to_id.insert(rel_path.to_string(), id);
+        is_some.then_some(id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -446,9 +522,62 @@ impl SpriteRenderer {
         collision: Option<&WorldCollision>,
         brush_colliders: &[BrushCollider],
     ) -> PreparedSprites {
-        let mut verts: Vec<SpriteVertex> = Vec::new();
-        let mut prepared = Vec::new();
-        for (d, path) in draws.iter().zip(paths) {
+        self.prepare_iter(
+            device,
+            queue,
+            vfs,
+            draws.iter().zip(paths.iter().copied()),
+            view,
+            params,
+            collision,
+            brush_colliders,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_from_registry(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &Vfs,
+        draws: &[SpriteDraw],
+        models: &ModelRegistry,
+        view: &ViewBasis,
+        params: &SpritePassParams,
+        collision: Option<&WorldCollision>,
+        brush_colliders: &[BrushCollider],
+    ) -> PreparedSprites {
+        self.prepare_iter(
+            device,
+            queue,
+            vfs,
+            draws
+                .iter()
+                .map(|d| (d, models.get(d.model).map(|e| e.name.as_str()))),
+            view,
+            params,
+            collision,
+            brush_colliders,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_iter<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vfs: &Vfs,
+        items: impl Iterator<Item = (&'a SpriteDraw, Option<&'a str>)>,
+        view: &ViewBasis,
+        params: &SpritePassParams,
+        collision: Option<&WorldCollision>,
+        brush_colliders: &[BrushCollider],
+    ) -> PreparedSprites {
+        self.scratch_verts.clear();
+        self.prepared_batches.clear();
+        let mut sprite_count = 0usize;
+
+        for (d, path) in items {
             let Some(path) = path else { continue };
             if d.mode == EntRenderMode::Glow
                 && let Some(world) = collision
@@ -456,10 +585,10 @@ impl SpriteRenderer {
             {
                 continue;
             }
-            let Some(key) = self.ensure_loaded(device, queue, vfs, path) else {
+            let Some(sprite_idx) = self.ensure_loaded(device, queue, vfs, path) else {
                 continue;
             };
-            let Some(Some(spr)) = self.cache.get(&key) else {
+            let Some(Some(spr)) = self.sprites.get(sprite_idx as usize) else {
                 continue;
             };
             let Some(frame_idx) = clamp_frame(d.frame, spr.frames.len()) else {
@@ -482,24 +611,27 @@ impl SpriteRenderer {
             }
             let color = [d.color[0], d.color[1], d.color[2], alpha];
             let quad = sprite_quad(&axes, frame.left, frame.right, frame.up, frame.down, scale);
-            let first_vertex = verts.len() as u32;
+            let first_vertex = self.scratch_verts.len() as u32;
             for i in [0usize, 1, 2, 0, 2, 3] {
-                verts.push(SpriteVertex {
+                self.scratch_verts.push(SpriteVertex {
                     position: quad[i].0.to_array(),
                     uv: quad[i].1,
                     color,
                 });
             }
-            prepared.push(PreparedSprite {
-                key,
-                frame: frame_idx,
+            push_sprite_batch(
+                &mut self.prepared_batches,
+                sprite_idx,
+                frame_idx as u32,
                 first_vertex,
-                blend: sprite_blend_for(d.mode),
-            });
+                6,
+                sprite_blend_for(d.mode),
+            );
+            sprite_count += 1;
         }
 
-        if verts.len() > self.vertex_cap {
-            self.vertex_cap = verts.len().next_power_of_two();
+        if self.scratch_verts.len() > self.vertex_cap {
+            self.vertex_cap = self.scratch_verts.len().next_power_of_two();
             self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("sprite_dynamic_vbuf"),
                 size: (self.vertex_cap * std::mem::size_of::<SpriteVertex>()) as u64,
@@ -507,8 +639,14 @@ impl SpriteRenderer {
                 mapped_at_creation: false,
             });
         }
-        if !verts.is_empty() {
-            queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&verts));
+        if !self.scratch_verts.is_empty() {
+            queue.write_buffer(
+                &self.vertex_buf,
+                0,
+                bytemuck::cast_slice(&self.scratch_verts),
+            );
+            self.frame_upload_bytes +=
+                (self.scratch_verts.len() * std::mem::size_of::<SpriteVertex>()) as u64;
         }
         let (fog_rgb, fog_density) = params.fog.unwrap_or(([0.0, 0.0, 0.0], 0.0));
         queue.write_buffer(
@@ -526,32 +664,58 @@ impl SpriteRenderer {
                 ],
             }),
         );
-        PreparedSprites { draws: prepared }
+        self.frame_upload_bytes += std::mem::size_of::<SpriteUniforms>() as u64;
+        PreparedSprites {
+            batch_count: self.prepared_batches.len(),
+            sprite_count,
+        }
     }
 
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, prepared: &PreparedSprites) {
-        if prepared.draws.is_empty() {
-            return;
+        let _ = self.draw_counted(pass, prepared);
+    }
+
+    pub(crate) fn draw_counted<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        prepared: &PreparedSprites,
+    ) -> usize {
+        if prepared.batch_count == 0 || self.prepared_batches.is_empty() {
+            return 0;
         }
+        let mut draw_calls = 0usize;
+        let mut last_blend: Option<SpriteBlend> = None;
+        let mut last_tex: Option<(u32, u32)> = None;
         pass.set_bind_group(0, &self.uniform_bg, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        for d in &prepared.draws {
-            let Some(Some(spr)) = self.cache.get(&d.key) else {
+        for b in &self.prepared_batches {
+            let Some(Some(spr)) = self.sprites.get(b.sprite_idx as usize) else {
                 continue;
             };
-            let Some(frame) = spr.frames.get(d.frame) else {
+            let Some(frame) = spr.frames.get(b.frame as usize) else {
                 continue;
             };
-            pass.set_pipeline(&self.pipelines[pipeline_slot(d.blend)]);
-            pass.set_bind_group(1, &frame.bind_group, &[]);
-            pass.draw(d.first_vertex..d.first_vertex + 6, 0..1);
+            if last_blend != Some(b.blend) {
+                pass.set_pipeline(&self.pipelines[pipeline_slot(b.blend)]);
+                last_blend = Some(b.blend);
+            }
+            let tex_key = (b.sprite_idx, b.frame);
+            if last_tex != Some(tex_key) {
+                pass.set_bind_group(1, &frame.bind_group, &[]);
+                last_tex = Some(tex_key);
+            }
+            pass.draw(b.first_vertex..b.first_vertex + b.vertex_count, 0..1);
+            draw_calls += 1;
         }
+        draw_calls
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::scene::ModelHandle;
+    use glam::Vec3;
 
     #[test]
     fn blend_per_render_mode() {
@@ -575,5 +739,139 @@ mod tests {
     #[test]
     fn frame_extents_from_disk_origin() {
         assert_eq!(frame_extents(-8, 4, 16, 8), (-8.0, 8.0, 4.0, -4.0));
+    }
+
+    #[test]
+    fn coalesces_consecutive_smoke_puffs_into_one_batch_and_preserves_order() {
+        let mut batches = Vec::new();
+        for i in 0..50u32 {
+            push_sprite_batch(&mut batches, 0, 0, i * 6, 6, SpriteBlend::AlphaNoDepthWrite);
+        }
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].first_vertex, 0);
+        assert_eq!(batches[0].vertex_count, 300);
+
+        // Interleaving a different blend/sprite splits cleanly without reordering.
+        batches.clear();
+        push_sprite_batch(&mut batches, 0, 0, 0, 6, SpriteBlend::AlphaNoDepthWrite);
+        push_sprite_batch(&mut batches, 0, 0, 6, 6, SpriteBlend::AlphaNoDepthWrite);
+        push_sprite_batch(&mut batches, 1, 0, 12, 6, SpriteBlend::Add);
+        push_sprite_batch(&mut batches, 0, 0, 18, 6, SpriteBlend::AlphaNoDepthWrite);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].vertex_count, 12);
+        assert_eq!(batches[1].vertex_count, 6);
+        assert_eq!(batches[2].vertex_count, 6);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn smoke_cloud_45_puffs_draws_in_one_draw_call_if_installed() {
+        let Ok(gamedir) = std::env::var("CS16_GAMEDIR") else {
+            return;
+        };
+        let Ok(vfs) = Vfs::open(std::path::Path::new(&gamedir), cs_vfs::VfsConfig::default()) else {
+            return;
+        };
+        if !vfs.exists("sprites/gas_puff_01.spr") {
+            return;
+        }
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        })) else {
+            return;
+        };
+        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("sprite-batch-test"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        })) else {
+            return;
+        };
+
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut renderer = SpriteRenderer::new(&device, format);
+        let draws: Vec<SpriteDraw> = (0..45)
+            .map(|i| SpriteDraw {
+                model: ModelHandle(1),
+                origin: Vec3::new(150.0 + (i as f32) * 2.0, ((i % 7) as f32 - 3.0) * 12.0, 0.0),
+                angles: Vec3::ZERO,
+                frame: 0.0,
+                scale: 2.9,
+                mode: EntRenderMode::TransAlpha,
+                blend: 1.0,
+                renderfx: 0,
+                color: [0.5, 0.5, 0.5],
+                distance_sq: 10_000.0 - (i as f32),
+                rank: 0,
+            })
+            .collect();
+        let paths: Vec<Option<&str>> = vec![Some("sprites/gas_puff_01.spr"); 45];
+        let view = ViewBasis::from_angles(Vec3::ZERO, Vec3::ZERO);
+        let params = SpritePassParams {
+            view_proj: Mat4::IDENTITY,
+            gamma: 2.5,
+            texgamma: 2.0,
+            brightness: 0.0,
+            software_mode: false,
+            fog: None,
+        };
+        let prep = renderer.prepare(&device, &queue, &vfs, &draws, &paths, &view, &params, None, &[]);
+        assert_eq!(prep.sprite_count(), 45);
+        assert_eq!(prep.batch_count(), 1, "45 gas_puff_01.spr puffs must coalesce into 1 batch");
+
+        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("spr_test_color"),
+            size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("spr_test_depth"),
+            size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let calls = {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("spr_test_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            renderer.draw_counted(&mut pass, &prep)
+        };
+        assert_eq!(calls, 1, "45 smoke puffs must render in 1 GPU draw call");
+        queue.submit(Some(enc.finish()));
     }
 }

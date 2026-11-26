@@ -9,7 +9,7 @@ const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n   
                      cargo xtask parity import-names <category> <file> [--dir <path>]\n       \
                      cargo xtask golden <ip:port> <name>\n       \
                      cargo xtask visual-diff [--map de_dust2] [--brightness <f32>] [--out target/visual-diff] [--reference-dir <dir>] [--resolution 1280x720] [--port 27099] [--ui none] [--build]\n       \
-                     cargo xtask bench [--ticks <n>] [--players <1..=32>] [--map <name>] [--gamedir <path>] [--stub] [--json]\n       \
+                     cargo xtask bench [--suite all|server|delta|client|gpu] [--gpu] [--ticks <n>] [--players <1..=32>] [--map <name>] [--gamedir <path>] [--stub] [--json]\n       \
                      cargo xtask web-build [--out <dir>]\n       \
                      cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]\n       \
                      cargo xtask mod build [dir] [--out <dir>]\n       \

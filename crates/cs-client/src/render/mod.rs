@@ -32,13 +32,13 @@ use tracing::info;
 use winit::window::Window;
 
 use crate::camera::Camera;
-use crate::render::bsp_renderer::{BspDrawParams, BspRenderStats, BspRenderer};
+use crate::render::bsp_renderer::{BspDrawParams, BspRenderStats, BspRenderer, PreparedBrushEntity};
 use crate::render::decal_renderer::{DecalRenderer, DecalSpawn};
 use crate::render::fx_renderer::{FxBeam, FxDrawParams, FxPoint, FxRenderer};
 use crate::render::lighting::{GpuLightsUniform, TextureFilterMode, TextureUploadConfig};
 use crate::render::mdl_renderer::{MdlPassParams, MdlRenderer, StudioInstance};
 use crate::render::scene::{
-    BrushDraw, DrawLists, FxFadeTracker, ModelKind, ModelRegistry, SceneFrame, StudioDraw,
+    DrawLists, EntRenderMode, FxFadeTracker, ModelKind, ModelRegistry, SceneFrame, StudioDraw,
     build_draw_lists_tracked, collect_opaque_brush_colliders,
 };
 use crate::render::skybox::SkyboxRenderer;
@@ -98,24 +98,33 @@ impl Default for RenderSettings<'static> {
     }
 }
 
-fn lights_to_bsp_dlights(lights: &GpuLightsUniform) -> Vec<BspDlight> {
-    let nd = (lights.counts[0] as usize).min(lights.dlight_pos_rad.len());
-    (0..nd)
-        .map(|i| {
-            let pr = lights.dlight_pos_rad[i];
-            let c = lights.dlight_col[i];
-            BspDlight {
-                origin: Vec3::new(pr[0], pr[1], pr[2]),
-                radius: pr[3],
-                minlight: 0.0,
-                color: [
-                    (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-                    (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-                    (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-                ],
-            }
-        })
-        .collect()
+const MAX_BSP_DLIGHTS: usize = 32;
+
+fn lights_to_bsp_dlights(lights: &GpuLightsUniform) -> ([BspDlight; MAX_BSP_DLIGHTS], usize) {
+    let mut buf: [BspDlight; MAX_BSP_DLIGHTS] = std::array::from_fn(|_| BspDlight {
+        origin: Vec3::ZERO,
+        radius: 0.0,
+        minlight: 0.0,
+        color: [0, 0, 0],
+    });
+    let nd = (lights.counts[0] as usize)
+        .min(lights.dlight_pos_rad.len())
+        .min(MAX_BSP_DLIGHTS);
+    for (i, slot) in buf.iter_mut().take(nd).enumerate() {
+        let pr = lights.dlight_pos_rad[i];
+        let c = lights.dlight_col[i];
+        *slot = BspDlight {
+            origin: Vec3::new(pr[0], pr[1], pr[2]),
+            radius: pr[3],
+            minlight: 0.0,
+            color: [
+                (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            ],
+        };
+    }
+    (buf, nd)
 }
 
 /// What the shell hands the renderer next to the entity scene.
@@ -150,12 +159,28 @@ impl<'a> Default for SceneDynamicData<'a> {
     }
 }
 
+/// Lightweight per-frame GPU draw-call and CPU->GPU upload counters captured by
+/// [`Renderer::render_frame`] (used by telemetry and `cargo xtask bench --gpu`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderFrameStats {
+    pub draw_calls: usize,
+    pub triangles: usize,
+    pub bytes_uploaded: u64,
+    pub bsp_draw_calls: usize,
+    pub mdl_draw_calls: usize,
+    pub sprite_draw_calls: usize,
+    pub decal_draw_calls: usize,
+    pub fx_draw_calls: usize,
+    pub sky_draw_calls: usize,
+}
+
 pub struct Renderer {
     pub surface: Option<wgpu::Surface<'static>>,
     offscreen_tex: Option<wgpu::Texture>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     depth_view: wgpu::TextureView,
     msaa_samples: u32,
     msaa_color_view: Option<wgpu::TextureView>,
@@ -177,6 +202,9 @@ pub struct Renderer {
     pub egui_renderer: egui_wgpu::Renderer,
     pub adapter_name: String,
     pub backend_name: String,
+    scratch_solid_brushes: Vec<PreparedBrushEntity>,
+    scratch_trans_brushes: Vec<PreparedBrushEntity>,
+    last_frame_stats: RenderFrameStats,
 }
 
 /// Selects WebGL2 downlevel limits on GL backends so browser WebGL2 fallback stays within caps.
@@ -186,6 +214,30 @@ pub fn required_limits_for_adapter(adapter: &wgpu::Adapter) -> wgpu::Limits {
     } else {
         wgpu::Limits::default().using_resolution(adapter.limits())
     }
+}
+
+/// Selects the swapchain [`wgpu::PresentMode`] for `gl_vsync`:
+/// - `gl_vsync 0`: prefers `Immediate` -> `Mailbox` -> `Fifo` (sub-ms classic scanout)
+/// - `gl_vsync 1`: `Fifo`
+pub fn select_present_mode(
+    supported: &[wgpu::PresentMode],
+    vsync: bool,
+) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::Fifo
+    } else if supported.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
+/// Selects `SurfaceConfiguration::desired_maximum_frame_latency` for `gl_lowlatency`:
+/// `1` when enabled (`gl_lowlatency 1`), `2` when disabled (`gl_lowlatency 0`).
+pub fn desired_frame_latency(low_latency: bool) -> u32 {
+    if low_latency { 1 } else { 2 }
 }
 
 impl Renderer {
@@ -249,13 +301,8 @@ impl Renderer {
             .find(|f| !f.is_srgb())
             .ok_or_else(|| "surface reported no supported texture formats".to_string())?;
 
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        let supported_present_modes = caps.present_modes;
+        let present_mode = select_present_mode(&supported_present_modes, false);
 
         let surface_usage = if caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST
@@ -272,7 +319,7 @@ impl Renderer {
             present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: desired_frame_latency(true),
         };
         surface.configure(&device, &config);
 
@@ -282,6 +329,7 @@ impl Renderer {
             device,
             queue,
             config,
+            supported_present_modes,
             adapter_info.name,
             backend_name,
         )
@@ -338,17 +386,20 @@ impl Renderer {
             device,
             queue,
             config,
+            vec![wgpu::PresentMode::Fifo],
             adapter_info.name,
             backend_name,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_init(
         surface: Option<wgpu::Surface<'static>>,
         offscreen_tex: Option<wgpu::Texture>,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
+        supported_present_modes: Vec<wgpu::PresentMode>,
         adapter_name: String,
         backend_name: String,
     ) -> Result<Self, String> {
@@ -378,6 +429,7 @@ impl Renderer {
             device,
             queue,
             config,
+            supported_present_modes,
             depth_view,
             msaa_samples,
             msaa_color_view: None,
@@ -396,7 +448,16 @@ impl Renderer {
             egui_renderer,
             adapter_name,
             backend_name,
+            scratch_solid_brushes: Vec::new(),
+            scratch_trans_brushes: Vec::new(),
+            last_frame_stats: RenderFrameStats::default(),
         })
+    }
+
+    /// Returns the draw-call and CPU->GPU upload counters captured during the most recent
+    /// completed [`Renderer::render_frame`] call.
+    pub fn last_frame_stats(&self) -> RenderFrameStats {
+        self.last_frame_stats
     }
 
     fn ensure_msaa_targets(&mut self, samples: u32) {
@@ -460,6 +521,31 @@ impl Renderer {
         }
     }
 
+    /// Dynamically reconfigures the swapchain whenever `gl_vsync` or `gl_lowlatency` changes
+    /// `PresentMode` or `desired_maximum_frame_latency`. Returns `true` when updated.
+    pub fn sync_swapchain_latency(&mut self, vsync: bool, low_latency: bool) -> bool {
+        let target_mode = select_present_mode(&self.supported_present_modes, vsync);
+        let target_latency = desired_frame_latency(low_latency);
+        if self.config.present_mode == target_mode
+            && self.config.desired_maximum_frame_latency == target_latency
+        {
+            return false;
+        }
+        self.config.present_mode = target_mode;
+        self.config.desired_maximum_frame_latency = target_latency;
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+            info!(
+                present_mode = ?target_mode,
+                desired_maximum_frame_latency = target_latency,
+                gl_vsync = u8::from(vsync),
+                gl_lowlatency = u8::from(low_latency),
+                "Reconfigured swapchain latency controls"
+            );
+        }
+        true
+    }
+
     pub fn load_map(&mut self, map: &BspMap, sky: &SkyboxTextures) {
         self.bsp.upload_map(&self.device, &self.queue, map);
         self.skybox.upload_skybox(&self.device, &self.queue, sky);
@@ -494,6 +580,12 @@ impl Renderer {
     /// `None` draws the world alone.
     pub fn set_entity_scene(&mut self, scene: Option<SceneFrame>) {
         self.entity_scene = scene;
+    }
+
+    /// Reclaims the previously installed [`SceneFrame`] after rendering so callers reusing
+    /// [`FrameView`](crate::view::FrameView) buffers preserve its `Vec` capacities across frames.
+    pub fn take_entity_scene(&mut self) -> Option<SceneFrame> {
+        self.entity_scene.take()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -593,9 +685,17 @@ impl Renderer {
         // Prepare dynamic 3D world models, FX, decals, lighting, MSAA and viewmodel
         self.ensure_msaa_targets(settings.msaa_samples);
 
+        // Reset per-frame upload counters before preparing this frame.
+        let _ = self.bsp.take_upload_bytes();
+        let _ = self.decals.take_upload_bytes();
+        let _ = self.mdl_view.take_upload_bytes();
+        let _ = self.mdl_scene.take_upload_bytes();
+        let _ = self.sprites.take_upload_bytes();
+        let _ = self.fx.take_upload_bytes();
+
         let mut prepared_viewmodel = None;
-        let mut prepared_solid_brushes = Vec::new();
-        let mut prepared_trans_brushes = Vec::new();
+        self.scratch_solid_brushes.clear();
+        self.scratch_trans_brushes.clear();
         let mut prepared_scene_studio = None;
         let mut prepared_sprites = None;
 
@@ -632,7 +732,8 @@ impl Renderer {
             gl_max_size: settings.gl_max_size,
             apply_texgamma: true,
         };
-        let bsp_dlights = lights_to_bsp_dlights(&scene.lights);
+        let (bsp_dlight_buf, bsp_dlight_count) = lights_to_bsp_dlights(&scene.lights);
+        let bsp_dlights = &bsp_dlight_buf[..bsp_dlight_count];
 
         let sample_light_at = |pos: Vec3| -> Vec3 {
             let mut rgb = self
@@ -663,7 +764,7 @@ impl Renderer {
                 gamma_cfg,
                 settings.gl_overbright,
                 tex_cfg,
-                &bsp_dlights,
+                bsp_dlights,
             );
             self.bsp.prepare_world_pvs(
                 &self.device,
@@ -766,18 +867,15 @@ impl Renderer {
             }
 
             if let (Some(lists), Some(_)) = (&draw_lists, &self.entity_scene) {
-                let brushes: Vec<&BrushDraw> = lists
-                    .solid_brush
-                    .iter()
-                    .chain(lists.trans_brush.iter())
-                    .collect();
-                let (solid, trans) = self
-                    .bsp
-                    .prepare_entities(&self.device, &self.queue, &brushes, settings.time_sec)
-                    .into_iter()
-                    .partition(|p| p.is_opaque());
-                prepared_solid_brushes = solid;
-                prepared_trans_brushes = trans;
+                self.bsp.prepare_entities_split_into(
+                    &self.device,
+                    &self.queue,
+                    &lists.solid_brush,
+                    &lists.trans_brush,
+                    settings.time_sec,
+                    &mut self.scratch_solid_brushes,
+                    &mut self.scratch_trans_brushes,
+                );
             }
 
             if let (Some(lists), Some(frame), Some(vfs)) =
@@ -850,11 +948,6 @@ impl Renderer {
                 );
 
                 if !lists.sprites.is_empty() {
-                    let paths: Vec<Option<&str>> = lists
-                        .sprites
-                        .iter()
-                        .map(|d| self.models.get(d.model).map(|e| e.name.as_str()))
-                        .collect();
                     let spr_params = SpritePassParams {
                         view_proj,
                         gamma: settings.gamma,
@@ -863,14 +956,17 @@ impl Renderer {
                         software_mode: settings.software_mode,
                         fog: settings.fog,
                     };
-                    let brush_colliders =
-                        collect_opaque_brush_colliders(&frame.entities, &self.models);
-                    prepared_sprites = Some(self.sprites.prepare(
+                    let brush_colliders = if lists.sprites.iter().any(|d| d.mode == EntRenderMode::Glow) {
+                        collect_opaque_brush_colliders(&frame.entities, &self.models)
+                    } else {
+                        Vec::new()
+                    };
+                    prepared_sprites = Some(self.sprites.prepare_from_registry(
                         &self.device,
                         &self.queue,
                         vfs,
                         &lists.sprites,
-                        &paths,
+                        &self.models,
                         &frame.view,
                         &spr_params,
                         self.world_collision.as_ref(),
@@ -903,6 +999,8 @@ impl Renderer {
             draw_calls: 0,
             triangles: 0,
         };
+        let mut frame_stats = RenderFrameStats::default();
+        let mut sky_upload_bytes = 0u64;
         let (world_color_view, world_resolve) = match &self.msaa_color_view {
             Some(msaa) => (msaa, Some(&view)),
             None => (&view, None),
@@ -963,20 +1061,23 @@ impl Renderer {
                     lights: scene.lights,
                 };
                 stats = self.bsp.draw(&self.queue, &mut pass, &bsp_params, &[]);
-                self.decals.draw_world(&mut pass);
+                frame_stats.bsp_draw_calls += stats.draw_calls;
+                frame_stats.triangles += stats.triangles;
+                frame_stats.decal_draw_calls += self.decals.draw_world_counted(&mut pass);
 
-                self.bsp.draw_entities(
+                frame_stats.bsp_draw_calls += self.bsp.draw_entities_counted(
                     &mut pass,
-                    &prepared_solid_brushes,
+                    &self.scratch_solid_brushes,
                     settings.time_sec,
                 );
-                self.decals.draw_solid_entities(&mut pass);
-                self.mdl_scene.draw_shadows(&mut pass);
+                frame_stats.decal_draw_calls += self.decals.draw_solid_entities_counted(&mut pass);
+                frame_stats.mdl_draw_calls += self.mdl_scene.draw_shadows_counted(&mut pass);
                 if let Some(ref studio) = prepared_scene_studio {
-                    self.mdl_scene.draw_opaque(&mut pass, studio);
+                    frame_stats.mdl_draw_calls +=
+                        self.mdl_scene.draw_opaque_counted(&mut pass, studio);
                 }
 
-                self.skybox.draw(
+                let (sky_calls, sky_bytes) = self.skybox.draw_counted(
                     &self.queue,
                     &mut pass,
                     sky_view_proj,
@@ -986,23 +1087,27 @@ impl Renderer {
                     settings.software_mode,
                     settings.fog,
                 );
+                frame_stats.sky_draw_calls += sky_calls;
+                sky_upload_bytes += sky_bytes;
 
-                self.fx.draw(&mut pass);
+                frame_stats.fx_draw_calls += self.fx.draw_counted(&mut pass);
 
-                self.bsp.draw_entities(
+                frame_stats.bsp_draw_calls += self.bsp.draw_entities_counted(
                     &mut pass,
-                    &prepared_trans_brushes,
+                    &self.scratch_trans_brushes,
                     settings.time_sec,
                 );
-                self.decals.draw_trans_entities(&mut pass);
+                frame_stats.decal_draw_calls += self.decals.draw_trans_entities_counted(&mut pass);
                 if let Some(ref studio) = prepared_scene_studio {
-                    self.mdl_scene.draw_translucent(&mut pass, studio);
+                    frame_stats.mdl_draw_calls +=
+                        self.mdl_scene.draw_translucent_counted(&mut pass, studio);
                 }
                 if let Some(ref spr) = prepared_sprites {
-                    self.sprites.draw(&mut pass, spr);
+                    frame_stats.sprite_draw_calls += self.sprites.draw_counted(&mut pass, spr);
                 }
                 if let Some(ref studio) = prepared_scene_studio {
-                    self.mdl_scene.draw_xray(&mut pass, studio);
+                    frame_stats.mdl_draw_calls +=
+                        self.mdl_scene.draw_xray_counted(&mut pass, studio);
                 }
             }
         }
@@ -1036,8 +1141,24 @@ impl Renderer {
             });
             pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
-            self.mdl_view.draw(&mut pass, vm_pass_data);
+            frame_stats.mdl_draw_calls += self.mdl_view.draw_counted(&mut pass, vm_pass_data);
         }
+
+        frame_stats.draw_calls = frame_stats.bsp_draw_calls
+            + frame_stats.mdl_draw_calls
+            + frame_stats.sprite_draw_calls
+            + frame_stats.decal_draw_calls
+            + frame_stats.fx_draw_calls
+            + frame_stats.sky_draw_calls;
+        frame_stats.bytes_uploaded = self.bsp.take_upload_bytes()
+            + self.bsp.draw_upload_bytes()
+            + self.decals.take_upload_bytes()
+            + self.mdl_view.take_upload_bytes()
+            + self.mdl_scene.take_upload_bytes()
+            + self.sprites.take_upload_bytes()
+            + self.fx.take_upload_bytes()
+            + sky_upload_bytes;
+        self.last_frame_stats = frame_stats;
 
         // 4. VGUI2 / HUD / Console pass (egui)
         {
@@ -1301,6 +1422,7 @@ pub fn render_offscreen_rgba(
 
     let mut bsp = BspRenderer::new(device, format);
     bsp.upload_map(device, queue, map);
+    let (bsp_dlight_buf, bsp_dlight_count) = lights_to_bsp_dlights(&params.lights);
     bsp.sync_gamma_and_lighting(
         device,
         queue,
@@ -1318,7 +1440,7 @@ pub fn render_offscreen_rgba(
             gl_max_size: params.gl_max_size,
             apply_texgamma: true,
         },
-        &lights_to_bsp_dlights(&params.lights),
+        &bsp_dlight_buf[..bsp_dlight_count],
     );
     bsp.prepare_world_pvs(device, queue, camera.position, params.r_vis);
     let mut skybox = SkyboxRenderer::new(device, format);
@@ -1381,6 +1503,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn swapchain_latency_selects_present_mode_and_frame_latency() {
+        use wgpu::PresentMode;
+
+        // `gl_vsync 0` prefers Immediate -> Mailbox -> Fifo.
+        assert_eq!(
+            select_present_mode(&[PresentMode::Fifo, PresentMode::Mailbox, PresentMode::Immediate], false),
+            PresentMode::Immediate
+        );
+        assert_eq!(
+            select_present_mode(&[PresentMode::Fifo, PresentMode::Mailbox], false),
+            PresentMode::Mailbox
+        );
+        assert_eq!(
+            select_present_mode(&[PresentMode::Fifo], false),
+            PresentMode::Fifo
+        );
+        assert_eq!(select_present_mode(&[], false), PresentMode::Fifo);
+
+        // `gl_vsync 1` always selects Fifo.
+        assert_eq!(
+            select_present_mode(&[PresentMode::Immediate, PresentMode::Mailbox, PresentMode::Fifo], true),
+            PresentMode::Fifo
+        );
+
+        // `gl_lowlatency 1` -> 1 frame max latency; `gl_lowlatency 0` -> 2.
+        assert_eq!(desired_frame_latency(true), 1);
+        assert_eq!(desired_frame_latency(false), 2);
+    }
+
     /// Headless device for pipeline/shader validation; `None` when the machine has no adapter.
     /// The GPU test below is a no-op in that case (it returns without assertions, like the other
     /// environment-dependent tests), so a green run does not prove the WGSL compiles.
@@ -1414,7 +1566,7 @@ mod tests {
         let _sprites = SpriteRenderer::new(&device, format);
         let _mdl = MdlRenderer::new(&device, format);
         // No map uploaded: entity preparation is a no-op, not a panic.
-        let draws: Vec<&BrushDraw> = Vec::new();
+        let draws: Vec<&crate::render::scene::BrushDraw> = Vec::new();
         assert!(bsp.prepare_entities(&device, &queue, &draws, 0.0).is_empty());
     }
 }

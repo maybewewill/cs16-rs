@@ -11,9 +11,11 @@ use crate::crypto::{
     com_block_sequence_crc_byte, com_munge, com_munge3, com_unmunge, com_unmunge3,
 };
 use crate::delta::{
-    DeltaEncodeFn, DeltaMarks, DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcClientData, GoldSrcEntityState, GoldSrcUserCmd,
-    GoldSrcWeaponData, delta_mask, has_delta_changes, read_delta, read_delta_description, write_delta,
-    write_delta_description, write_delta_encoded, write_delta_masked,
+    DeltaMarks, DeltaRecord, DeltaRegistry, DeltaSchema, GoldSrcClientData, GoldSrcEntityState,
+    GoldSrcUserCmd, GoldSrcWeaponData, has_delta_changes, has_struct_delta_changes, read_delta,
+    read_delta_description, read_struct_delta_into, struct_delta_mask, struct_vs_record_delta_mask,
+    write_delta, write_delta_description, write_struct_delta, write_struct_delta_from_record,
+    write_struct_delta_masked,
 };
 use crate::usermsg::{CsUserMsg, USERMSG_BASE_ID, UserMsgDesc, UserMsgRegistry, decode_cs_usermsg, encode_cs_usermsg};
 use crate::PROTOCOL_VERSION;
@@ -2036,16 +2038,24 @@ pub fn write_svc_spawnbaseline_encoded(
 
     w.write_u8(svc::SPAWNBASELINE);
     w.start_bit_writing();
+    let zero_state = GoldSrcEntityState::default();
     for (entnum, state) in baselines {
         let ent_type = wire_entity_type(state.entity_type);
         let schema = schemas.for_entity(*entnum, ent_type, max_clients);
-        let zero = schema.zero_record();
-        let rec = state.to_delta(schema);
         w.write_bits(*entnum as u32, 11);
         w.write_bits(ent_type as u32, 2);
-        with_record_encoder(&mut encode, schema, state, |hook| {
-            write_delta_encoded(w, schema, &zero, &rec, true, server_time, hook)
-        });
+        let mut mask = struct_delta_mask(schema, &zero_state, state);
+        if let (Some(enc), Some(name)) = (encode.as_mut(), schema.encoder.as_deref()) {
+            let from_zero = GoldSrcEntityState {
+                number: state.number,
+                entity_type: ent_type,
+                ..GoldSrcEntityState::default()
+            };
+            let mut marks = DeltaMarks::new(schema, mask);
+            enc(name, &from_zero, state, &mut marks);
+            mask = marks.mask();
+        }
+        write_struct_delta_masked(w, schema, state, mask, true, server_time);
     }
     w.write_bits(0xFFFF, 16);
     w.write_bits(0, 6); // 0 instance baselines
@@ -2069,11 +2079,11 @@ pub type WeaponRecords = BTreeMap<u8, DeltaRecord>;
 /// The records of `data` for the delta schema `schema` (`weapon_data_t`), without the ones equal
 /// to the zero record.
 pub fn weapon_records(schema: &DeltaSchema, data: &[GoldSrcWeaponData; 64]) -> WeaponRecords {
-    let zero = schema.zero_record();
+    let zero = GoldSrcWeaponData::default();
     data.iter()
         .enumerate()
+        .filter(|(_, w)| has_struct_delta_changes(schema, &zero, w))
         .map(|(i, w)| (i as u8, w.to_delta(schema)))
-        .filter(|(_, rec)| has_delta_changes(schema, &zero, rec))
         .collect()
 }
 
@@ -2101,23 +2111,28 @@ pub fn write_svc_clientdata_with_weapons(
     weapons: Option<WeaponDelta<'_>>,
     server_time: f64,
 ) -> DeltaRecord {
-    let to_rec = to.to_delta(schema);
-    let zero = schema.zero_record();
     w.write_u8(svc::CLIENTDATA);
     w.start_bit_writing();
     if let Some((seq, prev)) = from {
         w.write_one_bit(true);
         w.write_bits(seq as u32, 8);
-        write_delta(w, schema, prev, &to_rec, true, server_time);
+        write_struct_delta_from_record(w, schema, prev, to, true, server_time);
     } else {
+        let zero_cd = GoldSrcClientData::default();
         w.write_one_bit(false);
-        write_delta(w, schema, &zero, &to_rec, true, server_time);
+        write_struct_delta(w, schema, &zero_cd, to, true, server_time);
     }
     if let Some(weapons) = weapons {
-        let wzero = weapons.schema.zero_record();
+        let mut wzero: Option<DeltaRecord> = None;
         for index in 0..64u8 {
-            let from = weapons.from.get(&index).unwrap_or(&wzero);
-            let to = weapons.to.get(&index).unwrap_or(&wzero);
+            let from_opt = weapons.from.get(&index);
+            let to_opt = weapons.to.get(&index);
+            if from_opt.is_none() && to_opt.is_none() {
+                continue;
+            }
+            let z = wzero.get_or_insert_with(|| weapons.schema.zero_record());
+            let from = from_opt.unwrap_or(z);
+            let to = to_opt.unwrap_or(z);
             if has_delta_changes(weapons.schema, from, to) {
                 w.write_one_bit(true);
                 w.write_bits(u32::from(index), 6);
@@ -2127,7 +2142,7 @@ pub fn write_svc_clientdata_with_weapons(
     }
     w.write_one_bit(false); // end weapon_data_t list
     w.end_bit_writing();
-    to_rec
+    to.to_delta(schema)
 }
 
 /// Map a caller-side entity type byte (`GoldSrcEntityState::entity_type`, or the type stored next
@@ -2235,25 +2250,233 @@ impl<'a> EntitySchemas<'a> {
 pub type EntityEncodeFn<'e> =
     &'e mut dyn FnMut(&str, &GoldSrcEntityState, &GoldSrcEntityState, &mut DeltaMarks<'_>);
 
-/// Runs `f` with the record-level encoder of `schema` for the entity `to`: the schema's
-/// conditional encoder `encode` wraps, `None` when either is missing.
-fn with_record_encoder<R>(
-    encode: &mut Option<EntityEncodeFn<'_>>,
+/// Computes the changed-field bitmask for entity `to` against an optional base [`DeltaRecord`],
+/// applying `encode` directly on stack [`DeltaMarks`] without allocating a [`DeltaRecord`] for
+/// `to` or for a zero base.
+fn entity_delta_mask_against_base(
     schema: &DeltaSchema,
+    base: Option<&DeltaRecord>,
     to: &GoldSrcEntityState,
-    f: impl FnOnce(Option<DeltaEncodeFn<'_>>) -> R,
-) -> R {
-    match (encode.as_mut(), schema.encoder.as_deref()) {
-        (Some(encode), Some(name)) => {
-            let wire_type = wire_entity_type(to.entity_type);
-            let mut hook = |from: &DeltaRecord, _to: &DeltaRecord, marks: &mut DeltaMarks<'_>| {
-                let from = GoldSrcEntityState::from_delta(to.number, wire_type, from, schema);
-                encode(name, &from, to, marks);
-            };
-            f(Some(&mut hook))
+    encode: &mut Option<EntityEncodeFn<'_>>,
+) -> u64 {
+    let mut mask = match base {
+        Some(base_rec) => struct_vs_record_delta_mask(schema, base_rec, to),
+        None => {
+            let zero = GoldSrcEntityState::default();
+            struct_delta_mask(schema, &zero, to)
         }
-        _ => f(None),
+    };
+    if let (Some(enc), Some(name)) = (encode.as_mut(), schema.encoder.as_deref()) {
+        let wire_type = wire_entity_type(to.entity_type);
+        let from_state = match base {
+            Some(base_rec) => GoldSrcEntityState::from_delta(to.number, wire_type, base_rec, schema),
+            None => GoldSrcEntityState {
+                number: to.number,
+                entity_type: wire_type,
+                ..GoldSrcEntityState::default()
+            },
+        };
+        let mut marks = DeltaMarks::new(schema, mask);
+        enc(name, &from_state, to, &mut marks);
+        mask = marks.mask();
     }
+    mask
+}
+
+/// Precomputed per-entity wire operation produced by Stage 1 (after any game conditional encoder
+/// has edited the changed-field bitmask) and bit-packed in Stage 2 without touching `GameDll`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedEntityOp {
+    /// Emit a delta removal for this entity number.
+    Remove(u16),
+    /// Emit entity `entities[entity_idx]` with wire `custom` flag and final field bitmask `mask`.
+    Update {
+        entity_idx: usize,
+        custom: bool,
+        mask: u64,
+    },
+}
+
+/// Stage-1 mask evaluation for `svc_packetentities` (full snapshot), returning sorted operations
+/// ready for [`write_svc_packetentities_full_prepared`].
+pub fn prepare_packetentities_full_ops(
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
+    entities: &[GoldSrcEntityState],
+    mut encode: Option<EntityEncodeFn<'_>>,
+) -> Vec<PreparedEntityOp> {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
+        return Vec::new();
+    };
+    let mut order: Vec<usize> = (0..entities.len()).collect();
+    order.sort_by_key(|&i| entities[i].number);
+    let mut ops = Vec::with_capacity(order.len());
+    for entity_idx in order {
+        let ent = &entities[entity_idx];
+        let (custom, schema) = schemas.for_state(ent, max_clients);
+        let base = matching_base(caller_entry(baselines.get(&ent.number)), custom, schema);
+        let mask = entity_delta_mask_against_base(schema, base, ent, &mut encode);
+        ops.push(PreparedEntityOp::Update {
+            entity_idx,
+            custom,
+            mask,
+        });
+    }
+    ops
+}
+
+/// Stage-2 bit-packer for [`prepare_packetentities_full_ops`]. Produces bit-for-bit identical
+/// output to [`write_svc_packetentities_full_encoded`].
+pub fn write_svc_packetentities_full_prepared(
+    w: &mut MsgWriter,
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    entities: &[GoldSrcEntityState],
+    ops: &[PreparedEntityOp],
+    server_time: f64,
+) {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
+        return;
+    };
+    w.write_u8(svc::PACKETENTITIES);
+    w.write_u16(ops.len() as u16);
+    w.start_bit_writing();
+
+    let mut num_base: i32 = 0;
+    for &op in ops {
+        let PreparedEntityOp::Update {
+            entity_idx,
+            custom,
+            mask,
+        } = op
+        else {
+            continue;
+        };
+        let ent = &entities[entity_idx];
+        let num = ent.number as i32;
+        let (_, schema) = schemas.for_state(ent, max_clients);
+
+        let delta = num - num_base;
+        if delta == 1 {
+            w.write_one_bit(true);
+        } else {
+            w.write_one_bit(false);
+            if delta <= 0 || delta > 63 {
+                w.write_one_bit(true);
+                w.write_bits(num as u32, 11);
+            } else {
+                w.write_one_bit(false);
+                w.write_bits(delta as u32, 6);
+            }
+        }
+        num_base = num;
+        w.write_one_bit(custom);
+        w.write_one_bit(false); // no offset into this packet's earlier entities
+        write_struct_delta_masked(w, schema, ent, mask, true, server_time);
+    }
+
+    w.write_bits(0, 16);
+    w.end_bit_writing();
+}
+
+/// Stage-1 mask evaluation for `svc_deltapacketentities`, returning `(expected_count, ops)`
+/// ready for [`write_svc_packetentities_delta_prepared`].
+pub fn prepare_packetentities_delta_ops(
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    baselines: &BTreeMap<u16, (u8, DeltaRecord)>,
+    from: &BTreeMap<u16, (u8, impl Borrow<DeltaRecord>)>,
+    to: &[GoldSrcEntityState],
+    mut encode: Option<EntityEncodeFn<'_>>,
+) -> (u16, Vec<PreparedEntityOp>) {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
+        return (0, Vec::new());
+    };
+    let to_by_num: BTreeMap<u16, usize> =
+        to.iter().enumerate().map(|(i, e)| (e.number, i)).collect();
+    let mut numbers: Vec<u16> = from.keys().chain(to_by_num.keys()).copied().collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+
+    let mut ops = Vec::with_capacity(numbers.len());
+    for num in numbers {
+        let Some(&entity_idx) = to_by_num.get(&num) else {
+            ops.push(PreparedEntityOp::Remove(num));
+            continue;
+        };
+        let ent = &to[entity_idx];
+        let (custom, schema) = schemas.for_state(ent, max_clients);
+        let prev = from.get(&num);
+        let prev_entry = prev.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec.borrow()));
+        let mask = match matching_base(prev_entry, custom, schema) {
+            Some(prev_rec) => {
+                let mask = entity_delta_mask_against_base(schema, Some(prev_rec), ent, &mut encode);
+                if mask == 0 {
+                    continue;
+                }
+                mask
+            }
+            None => {
+                if prev.is_some() {
+                    ops.push(PreparedEntityOp::Remove(num));
+                }
+                let base = matching_base(caller_entry(baselines.get(&num)), custom, schema);
+                entity_delta_mask_against_base(schema, base, ent, &mut encode)
+            }
+        };
+        ops.push(PreparedEntityOp::Update {
+            entity_idx,
+            custom,
+            mask,
+        });
+    }
+    (to_by_num.len() as u16, ops)
+}
+
+/// Stage-2 bit-packer for [`prepare_packetentities_delta_ops`]. Produces bit-for-bit identical
+/// output to [`write_svc_packetentities_delta_encoded`].
+#[allow(clippy::too_many_arguments)]
+pub fn write_svc_packetentities_delta_prepared(
+    w: &mut MsgWriter,
+    reg: &DeltaRegistry,
+    max_clients: u8,
+    delta_seq: u8,
+    expected_count: u16,
+    to: &[GoldSrcEntityState],
+    ops: &[PreparedEntityOp],
+    server_time: f64,
+) {
+    let Some(schemas) = EntitySchemas::from_registry(reg) else {
+        return;
+    };
+    w.write_u8(svc::DELTAPACKETENTITIES);
+    w.write_u16(expected_count);
+    w.write_u8(delta_seq);
+    w.start_bit_writing();
+
+    let mut num_base: u16 = 0;
+    for &op in ops {
+        match op {
+            PreparedEntityOp::Remove(num) => {
+                write_delta_entity_header(w, &mut num_base, num, true);
+            }
+            PreparedEntityOp::Update {
+                entity_idx,
+                custom,
+                mask,
+            } => {
+                let ent = &to[entity_idx];
+                let (_, schema) = schemas.for_state(ent, max_clients);
+                write_delta_entity_header(w, &mut num_base, ent.number, false);
+                w.write_one_bit(custom);
+                write_struct_delta_masked(w, schema, ent, mask, true, server_time);
+            }
+        }
+    }
+
+    w.write_bits(0, 16);
+    w.end_bit_writing();
 }
 
 /// Write a full (`svc_packetentities`) entity snapshot (sorted by entity number).
@@ -2300,10 +2523,8 @@ pub fn write_svc_packetentities_full_encoded(
     for ent in sorted {
         let num = ent.number as i32;
         let (custom, schema) = schemas.for_state(ent, max_clients);
-        let rec = ent.to_delta(schema);
-        let zero = schema.zero_record();
-        let base = matching_base(caller_entry(baselines.get(&ent.number)), custom, schema)
-            .unwrap_or(&zero);
+        let base = matching_base(caller_entry(baselines.get(&ent.number)), custom, schema);
+        let mask = entity_delta_mask_against_base(schema, base, ent, &mut encode);
 
         let delta = num - num_base;
         if delta == 1 {
@@ -2321,9 +2542,7 @@ pub fn write_svc_packetentities_full_encoded(
         num_base = num;
         w.write_one_bit(custom);
         w.write_one_bit(false); // no offset into this packet's earlier entities
-        with_record_encoder(&mut encode, schema, ent, |hook| {
-            write_delta_encoded(w, schema, base, &rec, true, server_time, hook)
-        });
+        write_struct_delta_masked(w, schema, ent, mask, true, server_time);
     }
 
     w.write_bits(0, 16);
@@ -2408,18 +2627,14 @@ pub fn write_svc_packetentities_delta_encoded(
             continue;
         };
         let (custom, schema) = schemas.for_state(ent, max_clients);
-        let rec = ent.to_delta(schema);
 
         let prev = from.get(&num);
-        let zero = schema.zero_record();
         let prev_entry = prev.map(|(ent_type, rec)| (wire_entity_type(*ent_type), rec.borrow()));
         // The conditional encoder runs once per entity: its marks decide whether the entity is
         // sent and are then the fields written (`DELTA_CheckDelta`, then `DELTA_WriteDelta`).
         let mask = match matching_base(prev_entry, custom, schema) {
             Some(prev_rec) => {
-                let mask = with_record_encoder(&mut encode, schema, ent, |hook| {
-                    delta_mask(schema, prev_rec, &rec, hook)
-                });
+                let mask = entity_delta_mask_against_base(schema, Some(prev_rec), ent, &mut encode);
                 if mask == 0 {
                     continue;
                 }
@@ -2430,16 +2645,13 @@ pub fn write_svc_packetentities_delta_encoded(
                     // Kind changed: drop the old entity, then send this one as new.
                     write_delta_entity_header(w, &mut num_base, num, true);
                 }
-                let base = matching_base(caller_entry(baselines.get(&num)), custom, schema)
-                    .unwrap_or(&zero);
-                with_record_encoder(&mut encode, schema, ent, |hook| {
-                    delta_mask(schema, base, &rec, hook)
-                })
+                let base = matching_base(caller_entry(baselines.get(&num)), custom, schema);
+                entity_delta_mask_against_base(schema, base, ent, &mut encode)
             }
         };
         write_delta_entity_header(w, &mut num_base, num, false);
         w.write_one_bit(custom);
-        write_delta_masked(w, schema, &rec, mask, true, server_time);
+        write_struct_delta_masked(w, schema, *ent, mask, true, server_time);
     }
 
     w.write_bits(0, 16);
@@ -2650,13 +2862,13 @@ fn encode_clc_move_body(
     body.write_u8(num_backup);
     body.write_u8(num_cmds);
 
-    let mut prev = usercmd_schema.zero_record();
+    let zero = GoldSrcUserCmd::default();
+    let mut prev = &zero;
     for cmd in cmds_newest_first.iter().rev() {
-        let cur = cmd.to_delta(usercmd_schema);
         body.start_bit_writing();
-        let _ = write_delta(&mut body, usercmd_schema, &prev, &cur, true, 0.0);
+        let _ = write_struct_delta(&mut body, usercmd_schema, prev, cmd, true, 0.0);
         body.end_bit_writing();
-        prev = cur;
+        prev = cmd;
     }
 
     body.into_bytes()
@@ -2753,13 +2965,12 @@ pub fn parse_clc_stream(
                 let num_cmds = br.read_u8()?;
                 let total = (num_backup as usize) + (num_cmds as usize);
                 let mut cmds_oldest_first = Vec::with_capacity(total);
-                let mut prev = usercmd_schema.zero_record();
+                let mut cur = GoldSrcUserCmd::default();
                 for _ in 0..total {
                     br.start_bit_reading();
-                    let cur = read_delta(&mut br, usercmd_schema, &prev, 0.0)?;
+                    read_struct_delta_into(&mut br, usercmd_schema, &mut cur, 0.0)?;
                     br.end_bit_reading()?;
-                    cmds_oldest_first.push(GoldSrcUserCmd::from_delta(&cur, usercmd_schema));
-                    prev = cur;
+                    cmds_oldest_first.push(cur.clone());
                 }
                 cmds_oldest_first.reverse();
                 out.push(ClcMessage::Move {
@@ -3145,6 +3356,99 @@ mod tests {
         assert_eq!(pe.expected_count, 3);
         assert_eq!(pe.removed, vec![5]);
         assert_eq!(decode_entities(&reg, max_clients, &pe.entities), to);
+    }
+
+    #[test]
+    fn prepared_packetentities_match_encoded_bit_for_bit() {
+        let reg = DeltaRegistry::cs16_default();
+        let max_clients = 16;
+        let baselines = entity_records(
+            &reg,
+            max_clients,
+            &[normal_ent(1, 0.0, 12), normal_ent(20, 100.0, 22)],
+        );
+        let from_states = vec![
+            normal_ent(1, 100.0, 12),
+            normal_ent(5, 200.0, 19),
+            normal_ent(20, 300.0, 22),
+            beam_ent(40, 50.0, 31),
+        ];
+        let from = entity_records(&reg, max_clients, &from_states);
+        let to = vec![
+            normal_ent(20, 300.0, 22), // unchanged
+            normal_ent(1, 140.0, 12),  // local player (origin unset by encoder)
+            beam_ent(40, 88.0, 31),    // beam moved
+            normal_ent(55, -12.5, 44), // newly visible
+        ];
+        let make_enc = || {
+            |name: &str, _from: &GoldSrcEntityState, to: &GoldSrcEntityState, marks: &mut DeltaMarks<'_>| {
+                if name == "Player_Encode" && to.number == 1 {
+                    marks.unset_mask(marks.entity_origin_mask());
+                }
+            }
+        };
+
+        // Full snapshot parity.
+        let mut w_direct = MsgWriter::new();
+        let mut enc1 = make_enc();
+        write_svc_packetentities_full_encoded(
+            &mut w_direct,
+            &reg,
+            max_clients,
+            &baselines,
+            &to,
+            12.5,
+            Some(&mut enc1),
+        );
+        let mut enc2 = make_enc();
+        let full_ops =
+            prepare_packetentities_full_ops(&reg, max_clients, &baselines, &to, Some(&mut enc2));
+        let mut w_prep = MsgWriter::new();
+        write_svc_packetentities_full_prepared(
+            &mut w_prep,
+            &reg,
+            max_clients,
+            &to,
+            &full_ops,
+            12.5,
+        );
+        assert_eq!(w_prep.as_slice(), w_direct.as_slice());
+
+        // Delta snapshot parity.
+        let mut w_direct = MsgWriter::new();
+        let mut enc3 = make_enc();
+        write_svc_packetentities_delta_encoded(
+            &mut w_direct,
+            &reg,
+            max_clients,
+            7,
+            &baselines,
+            &from,
+            &to,
+            12.5,
+            Some(&mut enc3),
+        );
+        let mut enc4 = make_enc();
+        let (expected_count, delta_ops) = prepare_packetentities_delta_ops(
+            &reg,
+            max_clients,
+            &baselines,
+            &from,
+            &to,
+            Some(&mut enc4),
+        );
+        let mut w_prep = MsgWriter::new();
+        write_svc_packetentities_delta_prepared(
+            &mut w_prep,
+            &reg,
+            max_clients,
+            7,
+            expected_count,
+            &to,
+            &delta_ops,
+            12.5,
+        );
+        assert_eq!(w_prep.as_slice(), w_direct.as_slice());
     }
 
     /// An encoder that unsets the origin of entity 1 (the local player of the game's

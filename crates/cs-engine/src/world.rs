@@ -104,6 +104,14 @@ pub(crate) struct EntLeaves {
     headnode: i32,
 }
 
+/// Single-instruction bit test against a flat `u64` PVS/PAS bitset row.
+#[inline]
+pub(crate) fn pvs_bit(pvs_row: &[u64], leaf_bit: usize) -> bool {
+    pvs_row
+        .get(leaf_bit >> 6)
+        .is_some_and(|&word| (word & (1u64 << (leaf_bit & 63))) != 0)
+}
+
 impl EntLeaves {
     const NONE: Self = Self {
         num_leafs: 0,
@@ -117,23 +125,23 @@ impl EntLeaves {
         &self.leafnums[..self.num_leafs]
     }
 
-    /// Whether any of the leaves (or, on overflow, any leaf under the head node) is in `pvs`
+    /// Whether any of the leaves (or, on overflow, any leaf under the head node) is in `pvs_row`
     /// (`SV_HeadnodeVisible` and the leaf loop of `SV_AddToFullPack`).
-    pub(crate) fn visible(&self, bsp: &BspMap, pvs: &[bool]) -> bool {
+    pub(crate) fn visible(&self, bsp: &BspMap, pvs_row: &[u64]) -> bool {
         if self.headnode >= 0 {
-            return headnode_visible(bsp, pvs, self.headnode, &mut walk_budget(bsp), 0);
+            return headnode_visible(bsp, pvs_row, self.headnode, &mut walk_budget(bsp), 0);
         }
         self.leafnums[..self.num_leafs]
             .iter()
-            .any(|&n| usize::try_from(n).is_ok_and(|n| pvs.get(n).copied().unwrap_or(false)))
+            .any(|&n| usize::try_from(n).is_ok_and(|n| pvs_bit(pvs_row, n)))
     }
 }
 
-/// `SV_HeadnodeVisible`: whether any leaf under node `child` is in `pvs`. `budget` bounds the
+/// `SV_HeadnodeVisible`: whether any leaf under node `child` is in `pvs_row`. `budget` bounds the
 /// nodes visited, so a cyclic node tree in a hostile map cannot make it run away.
 fn headnode_visible(
     bsp: &BspMap,
-    pvs: &[bool],
+    pvs_row: &[u64],
     child: i32,
     budget: &mut u32,
     depth: u32,
@@ -145,7 +153,7 @@ fn headnode_visible(
                 .leafs
                 .get(leaf)
                 .is_some_and(|l| l.contents != CONTENTS_SOLID)
-            && pvs.get(leaf - 1).copied().unwrap_or(false);
+            && pvs_bit(pvs_row, leaf - 1);
     }
     if *budget == 0 || depth >= MAX_WALK_DEPTH {
         return false;
@@ -156,7 +164,7 @@ fn headnode_visible(
     };
     node.children
         .iter()
-        .any(|&c| headnode_visible(bsp, pvs, i32::from(c), budget, depth + 1))
+        .any(|&c| headnode_visible(bsp, pvs_row, i32::from(c), budget, depth + 1))
 }
 
 /// Depth the recursive walks of the BSP go to: a compiled tree is a few dozen levels deep, so
@@ -364,6 +372,11 @@ pub(crate) struct WorldLinks {
     pub(crate) force_retouch: f32,
     /// The engine's random numbers (`RandomLong` replacement), restarted with every map's world.
     pub(crate) rng: crate::rng::EngineRng,
+    /// Persistent fixed-ring studio hitbox pose cache (`rgStudioCache`), surviving across traces
+    /// within a server frame and automatically invalidated on any pose/origin/model key change.
+    pub(crate) studio_cache: crate::studio::SharedStudioCache,
+    /// Reusable per-frame snapshot scratch buffers (pre-filtered edicts & per-client vectors).
+    pub(crate) frame_scratch: crate::frame::FrameScratch,
 }
 
 impl WorldLinks {
@@ -386,6 +399,8 @@ impl WorldLinks {
             moved_players: Vec::new(),
             force_retouch: 0.0,
             rng: crate::rng::EngineRng::new(),
+            studio_cache: Default::default(),
+            frame_scratch: crate::frame::FrameScratch::default(),
         };
         world.create_node(0, bounds.0, bounds.1);
         world
@@ -565,11 +580,11 @@ impl WorldLinks {
         }
     }
 
-    /// Whether the entity's own leaves (not a box) are in `pvs`; `None` when the entity is not
+    /// Whether the entity's own leaves (not a box) are in `pvs_row`; `None` when the entity is not
     /// linked.
-    pub(crate) fn leaves_visible(&self, bsp: &BspMap, pvs: &[bool], id: EdictId) -> Option<bool> {
+    pub(crate) fn leaves_visible(&self, bsp: &BspMap, pvs_row: &[u64], id: EdictId) -> Option<bool> {
         let link = self.link_of(id.index).filter(|l| l.id == id)?;
-        Some(link.leaves.visible(bsp, pvs))
+        Some(link.leaves.visible(bsp, pvs_row))
     }
 
     /// How `id` is linked; `None` when it is not.
@@ -580,6 +595,20 @@ impl WorldLinks {
             headnode: link.leaves.headnode,
             area: link.area,
         })
+    }
+
+    /// Populates a reusable [`LinkSnapshot`] in place without allocating a new `leafnums` vector.
+    pub(crate) fn fill_link_snapshot(&self, id: EdictId, out: &mut LinkSnapshot) {
+        out.leafnums.clear();
+        if let Some(link) = self.link_of(id.index).filter(|l| l.id == id) {
+            out.leafnums
+                .extend_from_slice(&link.leaves.leafnums[..link.leaves.num_leafs]);
+            out.headnode = link.leaves.headnode;
+            out.area = link.area;
+        } else {
+            out.headnode = -1;
+            out.area = None;
+        }
     }
 
     /// The leaves kept for `id`; `None` when it is not linked.
@@ -978,9 +1007,10 @@ pub(crate) mod tests {
         assert_eq!(at(0.0, 20.0).leafnums(), [2]);
         let pvs = bsp.decompress_pvs(1);
         assert_eq!(pvs, [false, true, false, false]);
-        assert!(!at(-300.0, -200.0).visible(&bsp, &pvs));
-        assert!(at(-300.0, 450.0).visible(&bsp, &pvs));
-        assert!(!at(10.0, 20.0).visible(&bsp, &pvs));
+        let pvs_bits = [0b0010u64];
+        assert!(!at(-300.0, -200.0).visible(&bsp, &pvs_bits));
+        assert!(at(-300.0, 450.0).visible(&bsp, &pvs_bits));
+        assert!(!at(10.0, 20.0).visible(&bsp, &pvs_bits));
     }
 
     #[test]
@@ -998,7 +1028,7 @@ pub(crate) mod tests {
     #[test]
     fn head_node_stands_for_the_leaves_under_it() {
         let bsp = strip_bsp();
-        let pvs = bsp.decompress_pvs(1);
+        let pvs = [0b0010u64];
         let under = |headnode| EntLeaves {
             headnode,
             ..EntLeaves::NONE
@@ -1141,7 +1171,7 @@ pub(crate) mod tests {
             headnode: 0,
             ..EntLeaves::NONE
         };
-        assert!(!leaves.visible(&bsp, &[true; 4]));
+        assert!(!leaves.visible(&bsp, &[0b1111u64]));
         bsp.models.clear();
         let none = find_touched_leafs(&bsp, Vec3::ZERO, Vec3::ONE);
         assert_eq!(none, EntLeaves::NONE);
@@ -1174,7 +1204,7 @@ pub(crate) mod tests {
             headnode: 0,
             ..EntLeaves::NONE
         };
-        assert!(!leaves.visible(&bsp, &[false; 4]));
+        assert!(!leaves.visible(&bsp, &[0u64]));
         // A point walk is iterative and ends at the leaf the chain leads to.
         assert!(bsp.find_leaf(Vec3::new(1.0, 0.0, 0.0)) <= 4);
     }

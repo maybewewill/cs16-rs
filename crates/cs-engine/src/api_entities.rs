@@ -927,7 +927,6 @@ mod tests {
         eng.ent_mut(near).unwrap().classname.clear();
         assert_eq!(eng.entities_in_sphere(center, 10.0), [player, edge]);
         // A client slot is listed only while its client is active.
-        drop(eng);
         f.clients[0].active = false;
         let eng = f.api();
         assert_eq!(eng.entities_in_sphere(center, 10.0), [edge]);

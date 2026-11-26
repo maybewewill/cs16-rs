@@ -57,7 +57,7 @@ fn ensure_lowlatency_cvar(cvars: &mut CVarRegistry) {
     if cvars.get(LOW_LATENCY_CVAR).is_none() {
         cvars.register(
             LOW_LATENCY_CVAR,
-            "0",
+            "1",
             cs_cvar::CVarFlags::ARCHIVE,
             "Lower input latency (0 or 1)",
         );
@@ -2322,10 +2322,11 @@ mod tests {
 
         assert!(run_options_frame(&mut opts, &mut cvars, &mut rt) > 0);
         assert!(cvars.get("gl_lowlatency").is_some());
-        assert!(!cvars.get_bool("gl_lowlatency"));
+        assert!(cvars.get_bool("gl_lowlatency"));
         assert!(cvars.get_bool("m_customaccel"));
 
-        assert!(cvars.set("gl_lowlatency", "1"));
-        assert!(cvars.get_bool("gl_lowlatency"));
+        assert!(cvars.set("gl_lowlatency", "0"));
+        assert!(!cvars.get_bool("gl_lowlatency"));
+        assert!(cvars.get_bool("m_customaccel"));
     }
 }

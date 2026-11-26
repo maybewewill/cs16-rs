@@ -21,5 +21,15 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    proto48::run(&args);
+    // Run on an 8 MiB stack thread (matching Linux's default main stack) so unoptimized
+    // Windows dev builds loading unified WASM/Python/AMXX mod hosts do not overflow the
+    // OS's 1 MiB default main-thread stack.
+    let handle = std::thread::Builder::new()
+        .name("cs-server-main".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || proto48::run(&args))
+        .expect("spawn cs-server main thread");
+    if handle.join().is_err() {
+        std::process::exit(1);
+    }
 }
