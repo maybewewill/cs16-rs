@@ -4,15 +4,15 @@
 //!
 //! One code for every world: nothing here knows whether the server is on this machine.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::cell::RefCell;
 
 use cs_assets::bsp::BspMap;
 use cs_assets::materials::{MaterialTable, SurfaceMaterial};
-use cs_assets::mdl::{MdlSeqEvent, StudioModel};
+use cs_assets::mdl::{MdlSeqEvent, StudioModel, studio_sequence_linear_movements};
 use cs_assets::spr::GoldSrcSprite;
 use cs_clientcore::cvars::ClientCvars;
 use cs_clientcore::entities::ef;
@@ -20,10 +20,11 @@ use cs_clientcore::events::{EventFx, FiredEvent, ViewAnim};
 use cs_clientcore::hud::{CustomDecalInfo, evaluate_lightstyles};
 use cs_clientcore::tempents::{
     DynamicLight, FxTrace, FxWorld, ModelRef, RenderEffect, RenderMode, TempEnt, ftent,
+    goldsrc_palette_rgb,
 };
 use cs_clientcore::{
-    ClientEffects, Connection, DemoPlayer, EmitInputs, EntityKind,
-    ModelKind as CoreModelKind, PrecacheTables, Prediction, SoundStart, VisibleEntity,
+    ClientEffects, Connection, DemoPlayer, EmitInputs, EntityKind, ModelKind as CoreModelKind,
+    PrecacheTables, Prediction, SoundStart, VisibleEntity,
 };
 use cs_pm::collision::{CONTENTS_SOLID, Hull, WorldCollision};
 use cs_pm::pm::consts::{
@@ -37,9 +38,7 @@ use glam::Vec3;
 
 use crate::render::decal_renderer::{DecalSpawn, query_submodel_faces_in_sphere};
 use crate::render::fx_renderer::{FxBeam, FxPoint};
-use crate::render::lighting::{
-    DLightPool, GpuLightsUniform, SpotLight, compute_flashlight_spot,
-};
+use crate::render::lighting::{DLightPool, GpuLightsUniform, SpotLight, compute_flashlight_spot};
 use crate::render::mdl_renderer::{STUDIO_LOOPING, studio_frame};
 use crate::render::particles::{BeamSystem, ParticleSystem};
 use crate::render::scene::{
@@ -375,7 +374,193 @@ struct CachedSeqMeta {
     fps: f32,
     num_frames: usize,
     looping: bool,
+    linearmovement: Vec3,
     events: Vec<MdlSeqEvent>,
+}
+
+/// Client-side 3rd-person player gait state matching `CGameStudioModelRenderer`
+/// (`StudioEstimateGait` / `StudioProcessGait` / `StudioPlayerBlend`).
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerGaitState {
+    pub gait_frame: f32,
+    pub gait_yaw: f32,
+    pub gait_movement: f32,
+    pub prev_gait_origin: Vec3,
+    pub yaw_modifier: f32,
+    pub last_gait_seq: i32,
+}
+
+impl PlayerGaitState {
+    pub fn new(origin: Vec3, yaw: f32, gait_frame: f32, gait_seq: i32) -> Self {
+        Self {
+            gait_frame,
+            gait_yaw: yaw,
+            gait_movement: 0.0,
+            prev_gait_origin: origin,
+            yaw_modifier: 0.05,
+            last_gait_seq: gait_seq,
+        }
+    }
+}
+
+#[inline]
+fn wrap_angle_180(mut a: f32) -> f32 {
+    a %= 360.0;
+    if a > 180.0 {
+        a -= 360.0;
+    } else if a < -180.0 {
+        a += 360.0;
+    }
+    a
+}
+
+/// Port of `CGameStudioModelRenderer::StudioPlayerBlend` (`GameStudioModelRenderer.cpp`):
+/// maps packed player pitch (`angles.x = -v_angle.x / 3`, range `±15°`) into `[0..=255]`
+/// (`0` = looking up, `127` = level, `255` = looking down for CS 1.6 3x3 aim rows).
+pub fn studio_player_blend(pitch_packed: f32) -> u8 {
+    let range = (pitch_packed * 3.0).trunc();
+    let v = if range <= -45.0 {
+        255
+    } else if range >= 45.0 {
+        0
+    } else {
+        ((45.0 - range) * (255.0 / 90.0)) as i32
+    };
+    v.clamp(0, 255) as u8
+}
+
+/// Port of `CGameStudioModelRenderer::StudioEstimateGait`: estimates horizontal movement distance
+/// and leg heading `gait_yaw` from frame-to-frame origin deltas.
+pub fn studio_estimate_gait(st: &mut PlayerGaitState, origin: Vec3, angles_y: f32, dt: f32) {
+    let dt = dt.clamp(0.0, 1.0);
+    if dt <= 0.0 {
+        st.gait_movement = 0.0;
+        return;
+    }
+    let mut est_vel = origin - st.prev_gait_origin;
+    st.prev_gait_origin = origin;
+    est_vel.z = 0.0;
+    st.gait_movement = est_vel.length();
+    if st.gait_movement / dt < 5.0 {
+        st.gait_movement = 0.0;
+        est_vel.x = 0.0;
+        est_vel.y = 0.0;
+    }
+    if est_vel.x == 0.0 && est_vel.y == 0.0 {
+        let mut yaw_diff = wrap_angle_180(angles_y - st.gait_yaw);
+        let yaw = yaw_diff;
+        if (-5.0..=5.0).contains(&yaw) {
+            st.yaw_modifier = 0.05;
+        } else if !(-90.0..=90.0).contains(&yaw) {
+            st.yaw_modifier = 3.5;
+        }
+        if dt < 0.25 {
+            yaw_diff *= dt * st.yaw_modifier;
+        } else {
+            yaw_diff *= dt;
+        }
+        if yaw_diff.abs() < 0.05 {
+            yaw_diff = 0.0;
+        }
+        st.gait_yaw = wrap_angle_180(st.gait_yaw + yaw_diff);
+        st.gait_movement = 0.0;
+    } else {
+        st.gait_yaw = est_vel.y.atan2(est_vel.x).to_degrees().clamp(-180.0, 180.0);
+    }
+}
+
+/// Default `urban.mdl` / CS 1.6 gait sequence metadata `(fps, num_frames, looping, linearmovement.x)`
+/// used when VFS is absent in synthetic tests.
+fn default_player_gait_seq(gait_seq: i32) -> (f32, usize, bool, f32) {
+    match gait_seq {
+        1 => (15.0, 61, true, 0.0),      // idle1
+        2 => (10.0, 31, true, 0.0),      // crouch_idle
+        3 => (30.0, 33, true, 64.0),     // walk
+        4 => (60.0, 37, true, 150.0),    // run
+        5 => (30.0, 31, true, 75.0),     // crouchrun
+        6 | 7 => (30.0, 61, false, 0.0), // jump / longjump
+        8 => (30.0, 51, true, 0.0),      // swim
+        9 => (24.0, 61, true, 0.0),      // treadwater
+        _ => (30.0, 32, true, 0.0),
+    }
+}
+
+/// Port of `CGameStudioModelRenderer::StudioProcessGait`: computes leg heading `gait_yaw`,
+/// 9-way `[yaw_blend, pitch_blend]`, 4-bone spine yaw controllers, and velocity-locked `gait_frame`.
+pub fn studio_process_gait(
+    st: &mut PlayerGaitState,
+    origin: Vec3,
+    angles: Vec3,
+    gait_seq: i32,
+    framerate: f32,
+    dt: f32,
+    seq_meta: Option<(f32, usize, bool, f32)>,
+) -> (f32, [u8; 2], [u8; 4], f32) {
+    let dt = dt.clamp(0.0, 1.0);
+    studio_estimate_gait(st, origin, angles.y, dt);
+
+    let (fps, num_frames, looping, linear_x) =
+        seq_meta.unwrap_or_else(|| default_player_gait_seq(gait_seq));
+
+    if st.last_gait_seq != gait_seq {
+        if !looping {
+            st.gait_frame = 0.0;
+        }
+        st.last_gait_seq = gait_seq;
+    }
+
+    let mut yaw = wrap_angle_180(angles.y - st.gait_yaw);
+    if st.gait_movement != 0.0 {
+        if yaw > 120.0 {
+            st.gait_yaw = wrap_angle_180(st.gait_yaw - 180.0);
+            st.gait_movement = -st.gait_movement;
+            yaw -= 180.0;
+        } else if yaw < -120.0 {
+            st.gait_yaw = wrap_angle_180(st.gait_yaw + 180.0);
+            st.gait_movement = -st.gait_movement;
+            yaw += 180.0;
+        }
+    }
+
+    let yaw_norm = ((yaw / 90.0) * 128.0 + 127.0).clamp(0.0, 255.0);
+    let blend_yaw = (255.0 - yaw_norm).clamp(0.0, 255.0) as u8;
+    let blend_pitch = studio_player_blend(angles.x);
+    let spine_ctrl = yaw_norm as u8;
+
+    let nf = num_frames.max(1);
+    if linear_x > 0.0 {
+        st.gait_frame += (st.gait_movement / linear_x) * (nf as f32);
+    } else {
+        st.gait_frame += framerate.max(0.0) * fps * dt;
+    }
+
+    if nf <= 1 {
+        st.gait_frame = 0.0;
+    } else if looping {
+        let span = (nf - 1) as f32;
+        st.gait_frame = st.gait_frame.rem_euclid(span);
+    } else {
+        st.gait_frame = st.gait_frame.clamp(0.0, (nf - 1) as f32);
+    }
+
+    (
+        st.gait_yaw,
+        [blend_yaw, blend_pitch],
+        [spine_ctrl, spine_ctrl, spine_ctrl, spine_ctrl],
+        st.gait_frame,
+    )
+}
+
+/// Normalizes `.mdl` `5004` sound event paths (`\weapons\ak47_clipout.wav` or
+/// `sound/weapons/ak47_clipout.wav` -> `weapons/ak47_clipout.wav`).
+pub fn normalize_mdl_event_sound(raw: &str) -> String {
+    let replaced = raw.trim().replace('\\', "/");
+    let stripped = replaced.trim_start_matches('/');
+    if stripped.len() >= 6 && stripped[..6].eq_ignore_ascii_case("sound/") {
+        stripped[6..].to_string()
+    } else {
+        stripped.to_string()
+    }
 }
 
 /// Builds frames. Keeps what outlives one: the model registry, running beams, particles, dlights,
@@ -395,10 +580,12 @@ pub struct ViewBuilder {
     lag_state: ViewModelLagState,
     stair_smooth: StairSmoothState,
     bob_state: BobState,
-    player_gaits: HashMap<u16, (f32, Vec3)>,
+    player_gaits: HashMap<u16, PlayerGaitState>,
     vm_seq_cache: HashMap<String, Vec<CachedSeqMeta>>,
     hitbox_models: HashMap<String, Option<Arc<StudioModel>>>,
+    palette: Option<[u8; 768]>,
     last_vm_frame: f32,
+    last_vm_seq: i32,
     last_vm_path: String,
     last_vm_animtime: f32,
     vfs: Option<Vfs>,
@@ -779,7 +966,9 @@ impl ViewBuilder {
             player_gaits: HashMap::new(),
             vm_seq_cache: HashMap::new(),
             hitbox_models: HashMap::new(),
+            palette: None,
             last_vm_frame: 0.0,
+            last_vm_seq: -1,
             last_vm_path: String::new(),
             last_vm_animtime: -1.0,
             vfs: None,
@@ -800,17 +989,27 @@ impl ViewBuilder {
         }
     }
 
-    /// Provide world collision and VFS so client view building can trace flashlights and read
-    /// studio animation events.
+    /// Provide world collision and VFS so client view building can trace flashlights, load
+    /// `gfx/palette.lmp`, and read studio animation events.
     pub fn set_world_context(&mut self, collision: Option<Arc<WorldCollision>>, vfs: Option<Vfs>) {
         self.collision = collision;
-        self.materials = vfs
+        self.materials = vfs.as_ref().map(MaterialTable::load).unwrap_or_default();
+        self.palette = vfs
             .as_ref()
-            .map(MaterialTable::load)
-            .unwrap_or_default();
+            .and_then(|v| v.read_bytes("gfx/palette.lmp").ok())
+            .and_then(|bytes| bytes.get(..768).and_then(|s| <[u8; 768]>::try_from(s).ok()));
         self.vfs = vfs;
         self.vm_seq_cache.clear();
         self.hitbox_models.clear();
+    }
+
+    fn resolve_palette_color(&self, index: u8) -> [u8; 3] {
+        if let Some(pal) = &self.palette {
+            let base = usize::from(index) * 3;
+            [pal[base], pal[base + 1], pal[base + 2]]
+        } else {
+            goldsrc_palette_rgb(index)
+        }
     }
 
     pub fn set_map_bsp(&mut self, bsp: Option<Arc<BspMap>>) {
@@ -846,6 +1045,7 @@ impl ViewBuilder {
         self.last_weaponanim = -1;
         self.last_viewmodel = -1;
         self.last_vm_frame = 0.0;
+        self.last_vm_seq = -1;
         self.last_vm_path.clear();
         self.last_vm_animtime = -1.0;
         self.models_key = 0;
@@ -1022,8 +1222,10 @@ impl ViewBuilder {
                     let idx = usize::from(slot0);
                     if idx < self.player_model_handles.len() {
                         self.player_model_handles[idx] = Some(h);
-                    } else if let Some(entry) =
-                        self.player_model_extra.iter_mut().find(|(s, _)| *s == slot0)
+                    } else if let Some(entry) = self
+                        .player_model_extra
+                        .iter_mut()
+                        .find(|(s, _)| *s == slot0)
                     {
                         entry.1 = h;
                     } else {
@@ -1057,12 +1259,18 @@ impl ViewBuilder {
     ) -> Option<ModelRegistry> {
         let now = inputs.now;
         conn.frames_mut().advance(inputs.frametime.clamp(0.0, 0.25));
-        let weapon_state = {
+        let (weapon_state, holding_shield) = {
             let p = conn.predictor().prediction();
-            p.weapon
+            let ws = p
+                .weapon
                 .weapons
                 .get(&(p.weapon.weapon_id.clamp(0, 255) as u8))
-                .map_or(0, |w| w.m_i_weapon_state)
+                .map_or(0, |w| w.m_i_weapon_state);
+            let shield = p.holding_shield
+                || conn.client_data().is_some_and(|cd| {
+                    (cd.iuser3 & cs_clientcore::weapons_predict::PLAYER_HOLDING_SHIELD) != 0
+                });
+            (ws, shield)
         };
         let (max_smokepuffs, fastsprites, cvar_snap) = {
             let cv = conn.cvars();
@@ -1073,13 +1281,12 @@ impl ViewBuilder {
             )
         };
         conn.fx_mut().set_smoke_cvars(max_smokepuffs, fastsprites);
-        conn.set_fx_local(weapon_state, false, inputs.right_hand);
+        conn.set_fx_local(weapon_state, holding_shield, inputs.right_hand);
         let fired = conn.update_effects(now);
         let cd_snap = conn.client_data().map(ClientDataSnapshot::from_cd);
         let slot = conn.player_slot();
         let pred_snap = PredictionSnapshot::from_prediction(conn.predictor().prediction());
-        let max_edicts =
-            goldsrc_max_edicts(conn.server_info().map_or(32, |info| info.max_clients));
+        let max_edicts = goldsrc_max_edicts(conn.server_info().map_or(32, |info| info.max_clients));
         let (_, _, _, _, _, _, viewmodel_index) = resolve_eye_and_vm(cd_snap, Some(pred_snap));
 
         let mut registry_changed = self.resolve_player_model_handles(
@@ -1423,12 +1630,7 @@ impl ViewBuilder {
         let pred_effects = prediction.map_or(0, |p| p.effects);
         if alive && (fx.hud.flashlight_on || (pred_effects as u32 & ef::DIMLIGHT) != 0) {
             let (fwd, _, _) = crate::render::scene::angle_vectors(view_angles + punch);
-            let (spot, bounce) = compute_flashlight_spot(
-                eye,
-                fwd,
-                self.collision.as_deref(),
-                now,
-            );
+            let (spot, bounce) = compute_flashlight_spot(eye, fwd, self.collision.as_deref(), now);
             self.spotlights_scratch.push(spot);
             if let Some(b) = bounce {
                 self.dlights.add_light(b);
@@ -1464,13 +1666,17 @@ impl ViewBuilder {
         for e in &emitted.entities {
             out.entity_positions[usize::from(e.number)] = Some(e.origin);
             if e.kind == EntityKind::Player
-                && let Some(pid) = u8::try_from(e.number).ok().filter(|&n| (1..=32).contains(&n))
+                && let Some(pid) = u8::try_from(e.number)
+                    .ok()
+                    .filter(|&n| (1..=32).contains(&n))
                 && e.state.weaponmodel != 0
                 && let Some(h) = self.models.resolve(i32::from(e.state.weaponmodel))
             {
                 let models = &self.models;
                 let short = self.pmodel_short_cache.entry(h).or_insert_with(|| {
-                    models.get(h).and_then(|m| weapon_short_from_pmodel(&m.name))
+                    models
+                        .get(h)
+                        .and_then(|m| weapon_short_from_pmodel(&m.name))
                 });
                 if let Some(wname) = short.as_deref() {
                     seen_weapon_players |= 1u32 << (pid - 1);
@@ -1588,8 +1794,9 @@ impl ViewBuilder {
         if seen_weapon_players == 0 {
             out.player_weapons.clear();
         } else {
-            out.player_weapons
-                .retain(|&pid, _| (1..=32).contains(&pid) && (seen_weapon_players & (1u32 << (pid - 1))) != 0);
+            out.player_weapons.retain(|&pid, _| {
+                (1..=32).contains(&pid) && (seen_weapon_players & (1u32 << (pid - 1))) != 0
+            });
         }
         out.stats.entities = out.scene.entities.len();
 
@@ -1925,23 +2132,30 @@ impl ViewBuilder {
             let bones = mdl.evaluate_bones_full(&cs_assets::mdl::BoneEvalParams {
                 sequence: seq_idx,
                 frame,
-                loop_anim: false,
+                loop_anim: seq.flags & STUDIO_LOOPING != 0,
                 blending: ent.blending,
                 controller: ent.controllers,
                 mouth: ent.mouth,
                 prev_sequence: None,
-                gait: ent.gait.map(|(gs, gf)| ((gs.max(0) as usize).min(mdl.sequences.len() - 1), gf)),
+                gait: ent
+                    .gait
+                    .map(|(gs, gf)| ((gs.max(0) as usize).min(mdl.sequences.len() - 1), gf)),
             });
-            let ent_mat = crate::render::scene::studio_matrix(
-                ent.origin,
-                ent.angles,
-                ent.scale,
-                ent.player,
-            );
+            let ent_mat =
+                crate::render::scene::studio_matrix(ent.origin, ent.angles, ent.scale, ent.player);
             const EDGES: [(usize, usize); 12] = [
-                (0, 1), (1, 2), (2, 3), (3, 0),
-                (4, 5), (5, 6), (6, 7), (7, 4),
-                (0, 4), (1, 5), (2, 6), (3, 7),
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 4),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
             ];
             for hb in &mdl.hitboxes {
                 let Some(bm) = bones.get(hb.bone) else {
@@ -1980,12 +2194,7 @@ impl ViewBuilder {
         }
     }
 
-    fn surface_char_at(
-        &self,
-        pos: Vec3,
-        normal: Vec3,
-        brush: Option<&BrushCollider>,
-    ) -> u8 {
+    fn surface_char_at(&self, pos: Vec3, normal: Vec3, brush: Option<&BrushCollider>) -> u8 {
         let Some(ref bsp) = self.bsp else {
             return CHAR_TEX_CONCRETE;
         };
@@ -2023,6 +2232,35 @@ impl ViewBuilder {
         surface_material_to_char(self.materials.lookup(&tex.name))
     }
 
+    fn ensure_seq_cache_entry(&mut self, lower_path: &str) {
+        if self.vm_seq_cache.contains_key(lower_path) {
+            return;
+        }
+        let meta = self
+            .vfs
+            .as_ref()
+            .and_then(|vfs| vfs.read_bytes(lower_path).ok())
+            .and_then(|bytes| {
+                let linear = studio_sequence_linear_movements(&bytes);
+                let m = StudioModel::parse(&bytes).ok()?;
+                Some(
+                    m.sequences
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, s)| CachedSeqMeta {
+                            fps: s.fps,
+                            num_frames: s.num_frames,
+                            looping: (s.flags & STUDIO_LOOPING) != 0,
+                            linearmovement: linear.get(i).copied().unwrap_or(Vec3::ZERO),
+                            events: s.events,
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        self.vm_seq_cache.insert(lower_path.to_string(), meta);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn sample_viewmodel_events_into(
         &mut self,
@@ -2038,27 +2276,8 @@ impl ViewBuilder {
         self.vm_key_scratch
             .extend(vm.path.chars().map(|c| c.to_ascii_lowercase()));
         if !self.vm_seq_cache.contains_key(&self.vm_key_scratch) {
-            let meta = self
-                .vfs
-                .as_ref()
-                .and_then(|vfs| StudioModel::load(vfs, &self.vm_key_scratch).ok())
-                .map(|m| {
-                    m.sequences
-                        .into_iter()
-                        .map(|s| CachedSeqMeta {
-                            fps: s.fps,
-                            num_frames: s.num_frames,
-                            looping: (s.flags & STUDIO_LOOPING) != 0,
-                            events: s.events,
-                        })
-                        .collect()
-                });
             let key = self.vm_key_scratch.clone();
-            if let Some(list) = meta {
-                self.vm_seq_cache.insert(key, list);
-            } else {
-                self.vm_seq_cache.insert(key, Vec::new());
-            }
+            self.ensure_seq_cache_entry(&key);
         }
         let seq_idx = vm.sequence.max(0) as usize;
         let Some(seq_meta) = self
@@ -2068,61 +2287,76 @@ impl ViewBuilder {
         else {
             return;
         };
-        let cur_frame = studio_frame(
-            0.0,
-            vm.animtime,
-            1.0,
-            now_sec,
-            seq_meta.fps,
-            seq_meta.num_frames,
-            seq_meta.looping,
-        );
+        let span = seq_meta.num_frames.saturating_sub(1) as f32;
+        let elapsed_frames = ((now_sec - vm.animtime).max(0.0)) * seq_meta.fps;
+        // For non-looping sequences, reach the exact terminal frame `num_frames - 1` (unlike
+        // `studio_frame`'s `span - 0.001` pose clamp) so end-frame 5004 events such as
+        // `v_tmp.mdl` draw (`f16/17`) and `v_xm1014.mdl` start_reload (`f20/21`) always fire.
+        let cur_frame = if seq_meta.num_frames <= 1 {
+            0.0
+        } else if seq_meta.looping {
+            elapsed_frames.rem_euclid(span)
+        } else {
+            elapsed_frames.min(span)
+        };
         let switched_anim = self.last_vm_path != self.vm_key_scratch
+            || self.last_vm_seq != vm.sequence
+            || (self.last_vm_animtime - vm.animtime).abs() > 1e-4
             || prev_anim.is_none_or(|a| {
                 a.sequence != vm.sequence || (a.started - vm.animtime).abs() > 1e-4
-            })
-            || (self.last_vm_animtime - vm.animtime).abs() > 1e-4;
-        let prev_frame = if switched_anim { -0.01 } else { self.last_vm_frame };
+            });
+        let prev_frame = if switched_anim {
+            -0.01
+        } else {
+            self.last_vm_frame
+        };
         if self.last_vm_path != self.vm_key_scratch {
             self.last_vm_path.clear();
             self.last_vm_path.push_str(&self.vm_key_scratch);
         }
+        self.last_vm_seq = vm.sequence;
         self.last_vm_animtime = vm.animtime;
         self.last_vm_frame = cur_frame;
-        if cur_frame > prev_frame {
-            for ev in &seq_meta.events {
-                let f = ev.frame as f32;
-                if f > prev_frame && f <= cur_frame {
-                    match ev.event {
-                        5001 | 5011 | 5021 | 5031 => {
-                            let (fwd, _, _) = crate::render::scene::angle_vectors(view_plus_punch);
-                            self.dlights.add_light(DynamicLight {
-                                key: 9999,
-                                entity_light: false,
-                                origin: eye + fwd * 26.0,
-                                radius: 180.0,
-                                color: [255, 195, 95],
-                                die: now + 0.05,
-                                decay: 1800.0,
-                            });
-                        }
-                        5004 if !ev.options.is_empty() => {
-                            out_anim_sounds.push(ev.options.clone());
-                        }
-                        _ => {}
+
+        let suppress_silenced_flash = (self.vm_key_scratch.ends_with("v_m4a1.mdl")
+            && (1..=3).contains(&vm.sequence))
+            || (self.vm_key_scratch.ends_with("v_usp.mdl") && (1..=4).contains(&vm.sequence));
+        let wrapped = seq_meta.looping && !switched_anim && cur_frame < prev_frame;
+        for ev in &seq_meta.events {
+            let f = ev.frame as f32;
+            let crossed = if wrapped {
+                (f > prev_frame && f <= span) || (f >= 0.0 && f <= cur_frame)
+            } else {
+                cur_frame > prev_frame && f > prev_frame && f <= cur_frame
+            };
+            if crossed {
+                match ev.event {
+                    5001 | 5011 | 5021 | 5031 if !suppress_silenced_flash => {
+                        let (fwd, _, _) = crate::render::scene::angle_vectors(view_plus_punch);
+                        self.dlights.add_light(DynamicLight {
+                            key: 9999,
+                            entity_light: false,
+                            origin: eye + fwd * 26.0,
+                            radius: 180.0,
+                            color: [255, 195, 95],
+                            die: now + 0.05,
+                            decay: 1800.0,
+                        });
                     }
+                    5004 if !ev.options.is_empty() => {
+                        let normalized = normalize_mdl_event_sound(&ev.options);
+                        if !normalized.is_empty() {
+                            out_anim_sounds.push(normalized);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
     /// `R_AddEntity`'s input for one entity of the frame.
-    fn render_entity(
-        &mut self,
-        e: &VisibleEntity,
-        dt: f32,
-        time: f32,
-    ) -> Option<RenderEntity> {
+    fn render_entity(&mut self, e: &VisibleEntity, dt: f32, time: f32) -> Option<RenderEntity> {
         let player_model = (e.kind == EntityKind::Player)
             .then(|| e.number.checked_sub(1))
             .flatten()
@@ -2166,16 +2400,36 @@ impl ViewBuilder {
             ));
         }
 
-        // Player lower-body gait sequence tracking (`gaitsequence` split at `"Bip01 Spine"`).
-        if r.player && s.gaitsequence > 0 {
-            let (g_frame, prev_org) = self
-                .player_gaits
-                .entry(e.number)
-                .or_insert((e.latched.gaitframe, e.origin));
-            let moved = (*prev_org - e.origin).truncate().length();
-            *prev_org = e.origin;
-            *g_frame = (*g_frame + dt * 24.0 + moved * 0.25) % 64.0;
-            r.gait = Some((i32::from(s.gaitsequence), *g_frame));
+        // Player lower-body gait, leg heading, spine yaw twist, and aim pitch blending
+        // (`GameStudioModelRenderer.cpp` `StudioEstimateGait` / `StudioProcessGait` / `StudioPlayerBlend`).
+        if r.player && s.gaitsequence > 0 && r.renderfx != RENDERFX_DEAD_PLAYER {
+            let gait_seq = i32::from(s.gaitsequence);
+            let lower_model = self.models.get(model).map(|e| e.name.to_ascii_lowercase());
+            let seq_meta = lower_model.and_then(|lower| {
+                if !self.vm_seq_cache.contains_key(&lower) && self.vfs.is_some() {
+                    self.ensure_seq_cache_entry(&lower);
+                }
+                self.vm_seq_cache
+                    .get(&lower)
+                    .and_then(|v| v.get(gait_seq as usize))
+                    .map(|m| (m.fps, m.num_frames, m.looping, m.linearmovement.x))
+            });
+            let gait_state = self.player_gaits.entry(e.number).or_insert_with(|| {
+                PlayerGaitState::new(e.origin, e.angles.y, e.latched.gaitframe, gait_seq)
+            });
+            let (gait_yaw, blending, controllers, gait_frame) = studio_process_gait(
+                gait_state,
+                e.origin,
+                e.angles,
+                gait_seq,
+                s.framerate,
+                dt,
+                seq_meta,
+            );
+            r.angles.y = gait_yaw;
+            r.blending = blending;
+            r.controllers = controllers;
+            r.gait = Some((gait_seq, gait_frame));
         }
 
         if r.player && s.weaponmodel != 0 {
@@ -2204,7 +2458,10 @@ impl ViewBuilder {
             RenderMode::TransAdd => 5,
         });
         r.renderamt = t.render_amt.clamp(0.0, 255.0) as u8;
-        r.rendercolor = t.render_color;
+        r.rendercolor = match t.palette_color {
+            Some(idx) => self.resolve_palette_color(idx),
+            None => t.render_color,
+        };
         r.renderfx = t.render_fx;
         r.scale = t.scale;
         Some(r)
@@ -2264,7 +2521,8 @@ impl ViewBuilder {
     ) {
         match effect {
             RenderEffect::Beam { time, effect } => {
-                self.beam_sys.spawn_from_temp_effect(time.max(now - 0.1), &effect, entity_pos);
+                self.beam_sys
+                    .spawn_from_temp_effect(time.max(now - 0.1), &effect, entity_pos);
                 match effect {
                     TempEffect::BeamPoints { start, end, beam } => {
                         let life = if beam.life == 0 {
@@ -2395,12 +2653,13 @@ impl ViewBuilder {
         }
         if let Some(ViewAnim { sequence, body }) = fx.hud.server_weapon_anim.take() {
             // Avoid restarting a deploy/weapon animation when the server ack arrives for the
-            // same sequence that viewmodel switching or prediction already started.
+            // same sequence that viewmodel switching or prediction already started (keep < 0.25s
+            // so XM1014 0.30s / M3 0.45s consecutive shell-insert anims still restart cleanly).
             let already_started = self.anim.is_some_and(|a| {
                 a.sequence == sequence
                     && a.body == body
                     && (time - a.started) >= 0.0
-                    && (time - a.started) < 0.5
+                    && (time - a.started) < 0.25
             });
             if !already_started {
                 self.anim = Some(ViewAnimState {
@@ -2540,7 +2799,10 @@ mod tests {
 
     impl PacketTransport for Replay {
         fn recv(&mut self) -> Option<(PeerAddr, Vec<u8>)> {
-            let due = self.records.front().is_some_and(|(t, _)| *t <= self.clock.get());
+            let due = self
+                .records
+                .front()
+                .is_some_and(|(t, _)| *t <= self.clock.get());
             due.then(|| self.records.pop_front())
                 .flatten()
                 .map(|(_, data)| (PeerAddr::Loopback(0), data))
@@ -2607,19 +2869,32 @@ mod tests {
                 frames += 1;
                 assert!(view.eye.is_finite(), "{file}: eye {:?}", view.eye);
                 for e in &view.scene.entities {
-                    assert!(e.origin.is_finite() && e.angles.is_finite(), "{file}: {e:?}");
+                    assert!(
+                        e.origin.is_finite() && e.angles.is_finite(),
+                        "{file}: {e:?}"
+                    );
                     assert!(builder.models.get(e.model).is_some(), "{file}: {e:?}");
                 }
                 if view.stats.entities > best.entities {
                     best = view.stats;
                 }
             }
-            eprintln!("{file}: {frames} frames, busiest {best:?}, state {:?}", conn.state());
-            assert!(frames > 0, "{file}: never got in the game: {:?}", conn.state());
+            eprintln!(
+                "{file}: {frames} frames, busiest {best:?}, state {:?}",
+                conn.state()
+            );
+            assert!(
+                frames > 0,
+                "{file}: never got in the game: {:?}",
+                conn.state()
+            );
             assert!(best.entities > 0, "{file}: nothing was ever in the scene");
             // The local player is not drawn in first person, so a capture of one player has no
             // studio entity; its brush models (doors, plats) resolve by `modelindex`.
-            assert!(best.brush > 0, "{file}: no brush model resolved by modelindex");
+            assert!(
+                best.brush > 0,
+                "{file}: no brush model resolved by modelindex"
+            );
             assert!(!builder.models.is_empty());
         }
         assert!(replayed > 0 || std::env::var_os("CS16_GOLDEN_DIR").is_none());
@@ -2651,7 +2926,10 @@ mod tests {
             .handle_of(&ModelRef::Client("models/shell.mdl"))
             .expect("a client model");
         assert_eq!(h, ModelHandle(CLIENT_MODEL_BASE));
-        assert_eq!(b.models.get(h).map(|e| e.name.as_str()), Some("models/shell.mdl"));
+        assert_eq!(
+            b.models.get(h).map(|e| e.name.as_str()),
+            Some("models/shell.mdl")
+        );
         // Unchanged: no rebuild.
         assert!(!b.ensure_registry(&precache));
     }
@@ -2813,7 +3091,10 @@ mod tests {
         builder.pending_decals.clear();
         let _ = builder.collect_bullet_impacts(&fired, &[], 99.876, false);
         let p2 = builder.pending_decals[0].origin;
-        assert!((p1 - p2).length() < 1e-5, "single shot impact must be deterministic");
+        assert!(
+            (p1 - p2).length() < 1e-5,
+            "single shot impact must be deterministic"
+        );
     }
 
     #[test]
@@ -2887,32 +3168,91 @@ mod tests {
             hostage_spawns: Vec::new(),
             brush_entities: Vec::new(),
             planes: vec![
-                Plane { normal: Vec3::X, dist: 128.0, plane_type: 0 },
-                Plane { normal: Vec3::X, dist: 0.0, plane_type: 0 },
+                Plane {
+                    normal: Vec3::X,
+                    dist: 128.0,
+                    plane_type: 0,
+                },
+                Plane {
+                    normal: Vec3::X,
+                    dist: 0.0,
+                    plane_type: 0,
+                },
             ],
             vertices_raw: Vec::new(),
             visibility: Vec::new(),
             nodes: vec![
-                Node { plane: 0, children: [-1, -2], mins: [-512; 3], maxs: [512; 3], first_face: 0, num_faces: 0 },
-                Node { plane: 1, children: [-1, -2], mins: [-64; 3], maxs: [64; 3], first_face: 0, num_faces: 0 },
+                Node {
+                    plane: 0,
+                    children: [-1, -2],
+                    mins: [-512; 3],
+                    maxs: [512; 3],
+                    first_face: 0,
+                    num_faces: 0,
+                },
+                Node {
+                    plane: 1,
+                    children: [-1, -2],
+                    mins: [-64; 3],
+                    maxs: [64; 3],
+                    first_face: 0,
+                    num_faces: 0,
+                },
             ],
             texinfos: Vec::new(),
             faces: Vec::new(),
             lighting: Vec::new(),
             clipnodes: Vec::new(),
             leafs: vec![
-                Leaf { contents: CONTENTS_SOLID, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
-                Leaf { contents: CONTENTS_EMPTY, vis_offset: -1, mins: [-512; 3], maxs: [512; 3], first_mark_surface: 0, num_mark_surfaces: 0, ambient_levels: [0; 4] },
+                Leaf {
+                    contents: CONTENTS_SOLID,
+                    vis_offset: -1,
+                    mins: [-512; 3],
+                    maxs: [512; 3],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+                Leaf {
+                    contents: CONTENTS_EMPTY,
+                    vis_offset: -1,
+                    mins: [-512; 3],
+                    maxs: [512; 3],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
             ],
             mark_surfaces: Vec::new(),
             edges: Vec::new(),
             surf_edges: Vec::new(),
             models: vec![
-                BspModel { mins: Vec3::splat(-512.0), maxs: Vec3::splat(512.0), origin: Vec3::ZERO, head_nodes: [0, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
-                BspModel { mins: Vec3::splat(-64.0), maxs: Vec3::splat(64.0), origin: Vec3::ZERO, head_nodes: [1, -1, -1, -1], vis_leafs: 2, first_face: 0, num_faces: 0 },
+                BspModel {
+                    mins: Vec3::splat(-512.0),
+                    maxs: Vec3::splat(512.0),
+                    origin: Vec3::ZERO,
+                    head_nodes: [0, -1, -1, -1],
+                    vis_leafs: 2,
+                    first_face: 0,
+                    num_faces: 0,
+                },
+                BspModel {
+                    mins: Vec3::splat(-64.0),
+                    maxs: Vec3::splat(64.0),
+                    origin: Vec3::ZERO,
+                    head_nodes: [1, -1, -1, -1],
+                    vis_leafs: 2,
+                    first_face: 0,
+                    num_faces: 0,
+                },
             ],
             textures: Vec::new(),
-            lightmap_atlas: LightmapAtlas { width: 0, height: 0, rgba: Vec::new(), packed_faces: 0 },
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
             render_vertices: Vec::new(),
             render_indices: Vec::new(),
             batches: Vec::new(),
@@ -2937,11 +3277,7 @@ mod tests {
                 },
             );
         }
-        let fx_world = MapFxWorld::new(
-            Some(coll),
-            None,
-            Rc::new(RefCell::new(BTreeMap::new())),
-        );
+        let fx_world = MapFxWorld::new(Some(coll), None, Rc::new(RefCell::new(BTreeMap::new())));
         let mut rng = FxRandom::new(1);
         let mut sounds = SoundQueue::default();
         let mut fx = ClientEffects::default();
@@ -2992,11 +3328,32 @@ mod tests {
         let emitted = EmitResult {
             entities: vec![
                 // Opaque SOLID_BSP crate (*1) placed at (60, 60, 0) blocking (80, 60, 0) from (0, 0, 0).
-                make_vis(10, CoreModelKind::Brush, 2, Vec3::new(60.0, 60.0, 0.0), 0, 4),
+                make_vis(
+                    10,
+                    CoreModelKind::Brush,
+                    2,
+                    Vec3::new(60.0, 60.0, 0.0),
+                    0,
+                    4,
+                ),
                 // Unoccluded env_glow at (40, -40, 0).
-                make_vis(11, CoreModelKind::Sprite, 3, Vec3::new(40.0, -40.0, 0.0), 3, 0),
+                make_vis(
+                    11,
+                    CoreModelKind::Sprite,
+                    3,
+                    Vec3::new(40.0, -40.0, 0.0),
+                    3,
+                    0,
+                ),
                 // Occluded env_glow behind world BSP at (180, -40, 0).
-                make_vis(12, CoreModelKind::Sprite, 3, Vec3::new(180.0, -40.0, 0.0), 3, 0),
+                make_vis(
+                    12,
+                    CoreModelKind::Sprite,
+                    3,
+                    Vec3::new(180.0, -40.0, 0.0),
+                    3,
+                    0,
+                ),
             ],
             ..Default::default()
         };
@@ -3018,7 +3375,11 @@ mod tests {
             draw_lists.sprites.len(),
             2,
             "expected only the unoccluded env_glow and unoccluded TE_GLOWSPRITE, got {:?}",
-            draw_lists.sprites.iter().map(|s| s.origin).collect::<Vec<_>>()
+            draw_lists
+                .sprites
+                .iter()
+                .map(|s| s.origin)
+                .collect::<Vec<_>>()
         );
         let origins: Vec<Vec3> = draw_lists.sprites.iter().map(|s| s.origin).collect();
         assert!(origins.contains(&Vec3::new(40.0, -40.0, 0.0)));
@@ -3106,14 +3467,19 @@ mod tests {
             &inputs(1.02),
         );
         assert_eq!(fv2.fov, 90.0);
-        let vm2 = fv2.viewmodel.expect("knife viewmodel visible immediately on unzoom");
+        let vm2 = fv2
+            .viewmodel
+            .expect("knife viewmodel visible immediately on unzoom");
         assert_eq!(vm2.path, "models/v_knife.mdl");
         assert_eq!(vm2.sequence, 3);
         assert!((vm2.animtime - 1.02).abs() < 1e-4);
 
         // Frame 3: Server ack arrives 30ms later with svc_weaponanim(3, 0) & updated cd:
         // Must NOT restart animtime!
-        fx.hud.server_weapon_anim = Some(ViewAnim { sequence: 3, body: 0 });
+        fx.hud.server_weapon_anim = Some(ViewAnim {
+            sequence: 3,
+            body: 0,
+        });
         let cd_knife = make_cd(90.0, 11, 3);
         let (fv3, _) = builder.build_parts(
             &precache,
@@ -3184,7 +3550,10 @@ mod tests {
         if builder.vfs.is_some() {
             assert_eq!(fv6.anim_sounds, vec!["weapons/de_deploy.wav".to_string()]);
         }
-        fx.hud.server_weapon_anim = Some(ViewAnim { sequence: 5, body: 0 });
+        fx.hud.server_weapon_anim = Some(ViewAnim {
+            sequence: 5,
+            body: 0,
+        });
         let (fv7, _) = builder.build_parts(
             &precache,
             &mut fx,
@@ -3204,7 +3573,10 @@ mod tests {
             vm7.animtime
         );
         if builder.vfs.is_some() {
-            assert!(fv7.anim_sounds.is_empty(), "5004 must not double-play on server ack");
+            assert!(
+                fv7.anim_sounds.is_empty(),
+                "5004 must not double-play on server ack"
+            );
         }
     }
 
@@ -3306,10 +3678,19 @@ mod tests {
             &inputs(1.0),
         );
         assert!(frame_view.entity_positions.len() >= DEFAULT_MAX_EDICTS);
-        assert_eq!(frame_view.entity_position(2), Some(Vec3::new(20.0, 20.0, 0.0)));
-        assert_eq!(frame_view.entity_position(17), Some(Vec3::new(170.0, 20.0, 0.0)));
+        assert_eq!(
+            frame_view.entity_position(2),
+            Some(Vec3::new(20.0, 20.0, 0.0))
+        );
+        assert_eq!(
+            frame_view.entity_position(17),
+            Some(Vec3::new(170.0, 20.0, 0.0))
+        );
         assert_eq!(frame_view.entity_position(999), None);
-        assert_eq!(frame_view.player_weapons.get(&2).map(String::as_str), Some("ak47"));
+        assert_eq!(
+            frame_view.player_weapons.get(&2).map(String::as_str),
+            Some("ak47")
+        );
 
         let ent_ptr = frame_view.scene.entities.as_ptr();
         let ent_cap = frame_view.scene.entities.capacity();
@@ -3370,5 +3751,339 @@ mod tests {
         assert_eq!(frame_view.entity_position(2), None);
         assert_eq!(frame_view.entity_position(17), None);
         assert!(frame_view.player_weapons.is_empty());
+    }
+
+    #[test]
+    fn blood_sprite_resolves_crimson_rendercolor_with_fallback_and_steam_palette() {
+        use cs_clientcore::PrecacheEntry;
+        use cs_clientcore::interp::EmitResult;
+        use cs_clientcore::sound::SoundQueue;
+        use cs_clientcore::tempents::FxRandom;
+        use cs_proto48::tempent::TempEffect;
+
+        let mut precache = PrecacheTables::default();
+        for (idx, name) in [
+            (10u16, "sprites/bloodspray.spr"),
+            (11u16, "sprites/blood.spr"),
+        ] {
+            precache.models.insert(
+                idx,
+                PrecacheEntry {
+                    name: name.to_string(),
+                    download_size: 0,
+                    flags: 0,
+                },
+            );
+        }
+
+        let run_case = |vfs: Option<Vfs>| {
+            let mut builder = ViewBuilder::new();
+            builder.set_world_context(None, vfs);
+            let mut fx = ClientEffects::default();
+            let fx_world = MapFxWorld::new(None, None, Rc::new(RefCell::new(BTreeMap::new())));
+            let mut rng = FxRandom::new(7);
+            let mut sounds = SoundQueue::default();
+            fx.tempents.spawn_effect(
+                &TempEffect::BloodSprite {
+                    position: Vec3::new(16.0, 0.0, 32.0),
+                    spray: 10,
+                    drop: 11,
+                    color: 247,
+                    scale: 10,
+                },
+                1.0,
+                &precache,
+                &fx_world,
+                &mut rng,
+                &mut sounds,
+            );
+            let (fv, _) = builder.build_parts(
+                &precache,
+                &mut fx,
+                &BTreeMap::new(),
+                None,
+                None,
+                None,
+                EmitResult::default(),
+                Vec::new(),
+                Vec3::ZERO,
+                &inputs(1.01),
+            );
+            assert!(fv.stats.tempents > 0, "expected blood tempents in scene");
+            for ent in &fv.scene.entities {
+                assert!(
+                    ent.rendercolor[0] > 100 && ent.rendercolor[1] < 30 && ent.rendercolor[2] < 30,
+                    "blood sprite rendercolor must be crimson, got {:?}",
+                    ent.rendercolor
+                );
+            }
+        };
+
+        // 1. Without VFS (uses clean-room GoldSrc fallback palette table).
+        run_case(None);
+
+        // 2. With real Steam `valve/gfx/palette.lmp` when installed.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let steam = std::path::Path::new(r"D:\SteamLibrary\steamapps\common\Half-Life");
+            if steam.join("valve/gfx/palette.lmp").is_file()
+                && let Ok(vfs) = Vfs::discover(Some(steam), cs_vfs::VfsConfig::default())
+            {
+                run_case(Some(vfs));
+            }
+        }
+    }
+
+    #[test]
+    fn looping_5004_event_fires_once_per_cycle_on_wraparound() {
+        use cs_assets::mdl::MdlSeqEvent;
+
+        let mut builder = ViewBuilder::new();
+        builder.vm_seq_cache.insert(
+            "models/v_loop_test.mdl".to_string(),
+            vec![CachedSeqMeta {
+                fps: 15.0,
+                num_frames: 16, // span = 15 frames = 1.0s per loop
+                looping: true,
+                linearmovement: Vec3::ZERO,
+                events: vec![
+                    MdlSeqEvent {
+                        frame: 0,
+                        event: 5004,
+                        ev_type: 0,
+                        options: r"sound\weapons\loop_start.wav".to_string(),
+                    },
+                    MdlSeqEvent {
+                        frame: 14,
+                        event: 5004,
+                        ev_type: 0,
+                        options: "weapons/loop_end.wav".to_string(),
+                    },
+                ],
+            }],
+        );
+        let vm = ViewmodelView {
+            path: "models/v_loop_test.mdl".to_string(),
+            sequence: 0,
+            body: 0,
+            animtime: 1.0,
+            right_hand: true,
+        };
+        let prev = Some(ViewAnimState {
+            sequence: 0,
+            body: 0,
+            started: 1.0,
+        });
+        let mut fired = Vec::new();
+        // Step through 2.2 seconds in 0.1s increments (two wraparounds at t=2.0 and t=3.0).
+        for step in 0..=22 {
+            let t = 1.0 + step as f32 * 0.1;
+            let mut sounds = Vec::new();
+            builder.sample_viewmodel_events_into(
+                &vm,
+                prev,
+                t,
+                f64::from(t),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                &mut sounds,
+            );
+            fired.extend(sounds);
+        }
+        let starts = fired
+            .iter()
+            .filter(|s| s.as_str() == "weapons/loop_start.wav")
+            .count();
+        let ends = fired
+            .iter()
+            .filter(|s| s.as_str() == "weapons/loop_end.wav")
+            .count();
+        assert_eq!(
+            starts, 3,
+            "expected start event at t=1.0, 2.0, 3.0; got {fired:?}"
+        );
+        assert_eq!(
+            ends, 2,
+            "expected end event once per completed cycle; got {fired:?}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn steam_viewmodel_5004_events_cover_reload_silencer_frame0_and_terminal_frame() {
+        let steam = std::path::Path::new(r"D:\SteamLibrary\steamapps\common\Half-Life");
+        if !steam.join("cstrike").is_dir() {
+            return;
+        }
+        let Ok(vfs) = Vfs::discover(Some(steam), cs_vfs::VfsConfig::default()) else {
+            return;
+        };
+        let mut builder = ViewBuilder::new();
+        builder.set_world_context(None, Some(vfs));
+
+        let collect_seq = |builder: &mut ViewBuilder, path: &str, seq: i32, duration: f32| {
+            let vm = ViewmodelView {
+                path: path.to_string(),
+                sequence: seq,
+                body: 0,
+                animtime: 10.0,
+                right_hand: true,
+            };
+            let prev = Some(ViewAnimState {
+                sequence: seq,
+                body: 0,
+                started: 10.0,
+            });
+            let mut all = Vec::new();
+            let steps = (duration / 0.05).ceil() as i32;
+            for i in 0..=steps {
+                let t = 10.0 + i as f32 * 0.05;
+                let mut frame_sounds = Vec::new();
+                builder.sample_viewmodel_events_into(
+                    &vm,
+                    prev,
+                    t,
+                    f64::from(t),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    &mut frame_sounds,
+                );
+                all.extend(frame_sounds);
+            }
+            all
+        };
+
+        let ak_reload = collect_seq(&mut builder, "models/v_ak47.mdl", 1, 2.6);
+        assert!(
+            ak_reload.iter().any(|s| s == "weapons/ak47_clipout.wav"),
+            "{ak_reload:?}"
+        );
+        assert!(
+            ak_reload.iter().any(|s| s == "weapons/ak47_clipin.wav"),
+            "{ak_reload:?}"
+        );
+
+        let ak_draw = collect_seq(&mut builder, "models/v_ak47.mdl", 2, 1.2);
+        assert!(
+            ak_draw.iter().any(|s| s == "weapons/ak47_boltpull.wav"),
+            "{ak_draw:?}"
+        );
+
+        let m4_attach = collect_seq(&mut builder, "models/v_m4a1.mdl", 6, 2.1);
+        assert!(
+            m4_attach
+                .iter()
+                .any(|s| s == "weapons/m4a1_silencer_on.wav"),
+            "{m4_attach:?}"
+        );
+
+        let m4_detach = collect_seq(&mut builder, "models/v_m4a1.mdl", 13, 2.1);
+        assert!(
+            m4_detach
+                .iter()
+                .any(|s| s == "weapons/m4a1_silencer_off.wav"),
+            "{m4_detach:?}"
+        );
+
+        // Frame-0 event on `v_m3.mdl` insert (seq 3).
+        let m3_insert = collect_seq(&mut builder, "models/v_m3.mdl", 3, 0.6);
+        assert!(
+            m3_insert.iter().any(|s| s == "weapons/m3_insertshell.wav"),
+            "{m3_insert:?}"
+        );
+
+        // Terminal-frame `f16/17` event on `v_tmp.mdl` draw (seq 2).
+        let tmp_draw = collect_seq(&mut builder, "models/v_tmp.mdl", 2, 1.0);
+        assert!(
+            tmp_draw.iter().any(|s| s.ends_with(".wav")),
+            "terminal-frame 5004 event on v_tmp.mdl draw must fire: {tmp_draw:?}"
+        );
+    }
+
+    #[test]
+    fn studio_process_gait_drives_velocity_locked_legs_aim_pitch_and_skips_dead_players() {
+        use cs_clientcore::interp::VisibleEntity;
+        use cs_proto48::delta::GoldSrcEntityState;
+
+        assert_eq!(studio_player_blend(15.0), 0);
+        assert_eq!(studio_player_blend(0.0), 127);
+        assert_eq!(studio_player_blend(-15.0), 255);
+
+        let mut gait = PlayerGaitState::new(Vec3::ZERO, 0.0, 0.0, 4);
+        // Run forward along +X at 250 u/s for 0.1s -> 25 units -> advances gait_frame by (25/150)*37.
+        let (yaw_fwd, blend_fwd, ctrl_fwd, f_fwd) = studio_process_gait(
+            &mut gait,
+            Vec3::new(25.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            4,
+            1.0,
+            0.1,
+            Some((60.0, 37, true, 150.0)),
+        );
+        assert!(yaw_fwd.abs() < 1e-2);
+        assert_eq!(blend_fwd[1], 127);
+        assert!((f_fwd - (25.0 / 150.0) * 37.0).abs() < 0.05);
+        assert!((i16::from(ctrl_fwd[0]) - 127).abs() <= 1);
+
+        // Run backward along -X while still looking +X -> legs flip 180 deg and gait_frame backs up.
+        let (yaw_back, _, _, f_back) = studio_process_gait(
+            &mut gait,
+            Vec3::new(15.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            4,
+            1.0,
+            0.1,
+            Some((60.0, 37, true, 150.0)),
+        );
+        assert!(
+            yaw_back.abs() < 1e-2,
+            "backward run flips leg heading back to forward yaw: {yaw_back}"
+        );
+        assert!(
+            f_back < f_fwd,
+            "backward run reverses gait_frame ({f_back} < {f_fwd})"
+        );
+
+        // Dead player (`RENDERFX_DEAD_PLAYER`) must NOT run gait (preserves death pose).
+        let mut builder = ViewBuilder::new();
+        let mut precache = PrecacheTables::default();
+        precache.models.insert(
+            2,
+            cs_clientcore::PrecacheEntry {
+                name: "models/player.mdl".into(),
+                download_size: 0,
+                flags: 0,
+            },
+        );
+        builder.ensure_registry(&precache);
+        let dead = VisibleEntity {
+            number: 3,
+            kind: EntityKind::Player,
+            model: CoreModelKind::Studio,
+            modelindex: 2,
+            origin: Vec3::new(50.0, 0.0, 0.0),
+            angles: Vec3::new(0.0, 45.0, 0.0),
+            frame: 0.0,
+            sequence: 101,
+            rendermode: 0,
+            renderamt: 255,
+            renderfx: RENDERFX_DEAD_PLAYER,
+            rendercolor: [255, 255, 255],
+            local_player: false,
+            studio_lerp: true,
+            latched: Default::default(),
+            state: GoldSrcEntityState {
+                gaitsequence: 4,
+                framerate: 1.0,
+                ..Default::default()
+            },
+        };
+        let rendered = builder
+            .render_entity(&dead, 0.016, 1.0)
+            .expect("dead render entity");
+        assert!(
+            rendered.gait.is_none(),
+            "dead player must not receive gait blending"
+        );
     }
 }

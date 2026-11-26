@@ -12,8 +12,10 @@ pub const MDL_VERSION: i32 = 10;
 
 pub const STUDIO_NF_FLATSHADE: i32 = 0x0001;
 pub const STUDIO_NF_CHROME: i32 = 0x0002;
+pub const STUDIO_NF_FULLBRIGHT: i32 = 0x0004;
 pub const STUDIO_NF_ADDITIVE: i32 = 0x0020;
 pub const STUDIO_NF_MASKED: i32 = 0x0040;
+pub const STUDIO_NF_TWOSIDE: i32 = 0x0100;
 
 pub const STUDIO_X: i32 = 0x0001;
 pub const STUDIO_Y: i32 = 0x0002;
@@ -125,6 +127,7 @@ pub struct MdlVertexRef {
     pub pos: Vec3,
     pub normal: Vec3,
     pub bone: u8,
+    pub norm_bone: u8,
     pub uv: [f32; 2],
 }
 
@@ -208,7 +211,11 @@ impl StudioModel {
             {
                 model.textures = texs;
                 model.skin_families = families;
-                let base_skin = model.skin_families.first().map(Vec::as_slice).unwrap_or(&[]);
+                let base_skin = model
+                    .skin_families
+                    .first()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 remap_mesh_textures(&mut model.bodyparts, base_skin, &model.textures);
             }
         }
@@ -493,6 +500,7 @@ impl StudioModel {
                 let vert_info_idx = read_i32(data, m_base + 84)?.max(0) as usize;
                 let vert_idx = read_i32(data, m_base + 88)?.max(0) as usize;
                 let num_norms = read_i32(data, m_base + 92)?.max(0) as usize;
+                let norm_info_idx = read_i32(data, m_base + 96)?.max(0) as usize;
                 let norm_idx = read_i32(data, m_base + 100)?.max(0) as usize;
 
                 let mut verts = Vec::with_capacity(num_verts);
@@ -526,6 +534,11 @@ impl StudioModel {
                     ));
                 }
 
+                let mut norm_bones = Vec::with_capacity(num_norms);
+                for n in 0..num_norms {
+                    norm_bones.push(data.get(norm_info_idx + n).copied().unwrap_or(0));
+                }
+
                 let mut meshes = Vec::with_capacity(num_mesh);
                 for mi in 0..num_mesh {
                     let me_base = mesh_index + mi * 20;
@@ -546,6 +559,7 @@ impl StudioModel {
                         &verts,
                         &vert_bones,
                         &norms,
+                        &norm_bones,
                         inv_w,
                         inv_h,
                     );
@@ -709,15 +723,21 @@ impl StudioModel {
             params.blending,
             &adj,
         );
-        let prev_pose = params.prev_sequence.map(|(p_seq, p_frame, p_loop, weight)| {
-            (
-                self.eval_sequence_pose(p_seq, p_frame, p_loop, params.blending, &adj),
-                weight.clamp(0.0, 1.0),
-            )
-        });
+        let prev_pose = params
+            .prev_sequence
+            .map(|(p_seq, p_frame, p_loop, weight)| {
+                (
+                    self.eval_sequence_pose(p_seq, p_frame, p_loop, params.blending, &adj),
+                    weight.clamp(0.0, 1.0),
+                )
+            });
         let gait_info = params.gait.map(|(g_seq, g_frame)| {
             let mask = self.upper_body_bone_mask();
-            let g_pose = self.eval_sequence_pose(g_seq, g_frame, true, [0, 0], &adj);
+            let g_loop = self
+                .sequences
+                .get(g_seq)
+                .is_some_and(|s| (s.flags & 1) != 0);
+            let g_pose = self.eval_sequence_pose(g_seq, g_frame, g_loop, [0, 0], &adj);
             (mask, g_pose)
         });
 
@@ -870,8 +890,10 @@ impl StudioModel {
             return out;
         }
         let blend_type1 = seq.map_or(0, |s| s.blend_type[1]);
-        if blend_type1 == 0 || nb < 4 {
-            // 1D multi-blend (including CS 1.6 9-way pitch aim!).
+        // CS 1.6 player models encode 9-way (3x3 yaw x pitch) aim grids with `num_blends == 9`
+        // even when `blend_type[1] == 0` (`blending[0]` = yaw column, `blending[1]` = pitch row).
+        let use_2d = nb == 9 || (nb >= 4 && blend_type1 != 0);
+        if !use_2d {
             let x = (f32::from(blending[0]) / 255.0) * ((nb - 1) as f32);
             let i0 = (x.floor() as usize).min(nb - 1);
             let i1 = (i0 + 1).min(nb - 1);
@@ -882,8 +904,12 @@ impl StudioModel {
                 out.push((p0.lerp(p1, t), q0.slerp(q1, t)));
             }
         } else {
-            let cols = (nb as f32).sqrt().round().max(1.0) as usize;
-            let rows = nb / cols;
+            let cols = if nb == 9 {
+                3
+            } else {
+                (nb as f32).sqrt().round().max(1.0) as usize
+            };
+            let rows = (nb / cols).max(1);
             let fx = (f32::from(blending[0]) / 255.0) * (cols.saturating_sub(1) as f32);
             let fy = (f32::from(blending[1]) / 255.0) * (rows.saturating_sub(1) as f32);
             let x0 = (fx.floor() as usize).min(cols - 1);
@@ -909,11 +935,7 @@ impl StudioModel {
 
     /// Authentic GoldSrc `EF_BONEMERGE`: attach a `p_*.mdl` weapon directly to matching bone names
     /// (e.g. `Bip01 R Hand`, `Bip01 L Hand`) on the parent player model's already-evaluated skeleton!
-    pub fn evaluate_bones_merged(
-        &self,
-        parent: &StudioModel,
-        parent_bones: &[Mat4],
-    ) -> Vec<Mat4> {
+    pub fn evaluate_bones_merged(&self, parent: &StudioModel, parent_bones: &[Mat4]) -> Vec<Mat4> {
         let n = self.bones.len();
         let mut world = vec![Mat4::IDENTITY; n];
         for (i, bone) in self.bones.iter().enumerate() {
@@ -1125,12 +1147,14 @@ fn decode_anim_value(data: &[u8], start_offset: usize, target_frame: usize) -> f
     0.0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_mesh_tristrips(
     data: &[u8],
     mut offset: usize,
     verts: &[Vec3],
     vert_bones: &[u8],
     norms: &[Vec3],
+    norm_bones: &[u8],
     inv_w: f32,
     inv_h: f32,
 ) -> Vec<MdlVertexRef> {
@@ -1156,10 +1180,13 @@ fn decode_mesh_tristrips(
             let t = read_i16(data, offset + 6).unwrap_or(0) as f32;
             offset += 8;
 
+            let bone = vert_bones.get(v_idx).copied().unwrap_or(0);
+            let norm_bone = norm_bones.get(n_idx).copied().unwrap_or(bone);
             strip.push(MdlVertexRef {
                 pos: verts.get(v_idx).copied().unwrap_or(Vec3::ZERO),
                 normal: norms.get(n_idx).copied().unwrap_or(Vec3::Z),
-                bone: vert_bones.get(v_idx).copied().unwrap_or(0),
+                bone,
+                norm_bone,
                 uv: [s * inv_w, t * inv_h],
             });
         }
@@ -1451,8 +1478,14 @@ fn eval_studio_anim_pos(data: &[u8], anim_off: usize, chan: usize, frame: usize)
             return 0.0;
         }
         if k < total {
-            let idx = if k < valid { k } else { valid.saturating_sub(1) };
-            return read_i16(data, p + 2 + idx * 2).map(f32::from).unwrap_or(0.0);
+            let idx = if k < valid {
+                k
+            } else {
+                valid.saturating_sub(1)
+            };
+            return read_i16(data, p + 2 + idx * 2)
+                .map(f32::from)
+                .unwrap_or(0.0);
         }
         k -= total;
         p += (valid + 1) * 2;
@@ -1460,7 +1493,12 @@ fn eval_studio_anim_pos(data: &[u8], anim_off: usize, chan: usize, frame: usize)
     0.0
 }
 
-fn bound_vertex(mins: &mut [f32; 3], maxs: &mut [f32; 3], count: &mut usize, v: [f32; 3]) -> Option<()> {
+fn bound_vertex(
+    mins: &mut [f32; 3],
+    maxs: &mut [f32; 3],
+    count: &mut usize,
+    v: [f32; 3],
+) -> Option<()> {
     for &c in &v {
         if !c.is_finite() {
             return None;
@@ -1539,7 +1577,9 @@ pub fn studio_bounds(data: &[u8]) -> Option<([f32; 3], [f32; 3])> {
         if seqgroup != 0 {
             continue;
         }
-        let num_frames = usize::try_from(read_i32(data, s + 44).ok()?).ok()?.min(4096);
+        let num_frames = usize::try_from(read_i32(data, s + 44).ok()?)
+            .ok()?
+            .min(4096);
         let anim_index = usize::try_from(read_i32(data, s + 60).ok()?).ok()?;
         if anim_index.checked_add(12)? > data.len() {
             continue;
@@ -1578,6 +1618,41 @@ pub fn studio_bounds(data: &[u8]) -> Option<([f32; 3], [f32; 3])> {
     }
 
     Some((mins, maxs))
+}
+
+/// Reads per-sequence `linearmovement` vectors (`mstudioseqdesc_t` offsets `+76..+88`) directly
+/// from raw MDL v10 bytes without altering `MdlSequence`'s struct layout.
+pub fn studio_sequence_linear_movements(data: &[u8]) -> Vec<Vec3> {
+    if data.len() < 244 || &data[0..4] != MDL_MAGIC || read_i32(data, 4).ok() != Some(MDL_VERSION) {
+        return Vec::new();
+    }
+    let Ok(num_seq) = read_i32(data, 164)
+        .and_then(|n| usize::try_from(n).map_err(|_| MdlError::Truncated("seq")))
+    else {
+        return Vec::new();
+    };
+    let Ok(seq_index) = read_i32(data, 168)
+        .and_then(|n| usize::try_from(n).map_err(|_| MdlError::Truncated("seq")))
+    else {
+        return Vec::new();
+    };
+    if seq_index
+        .checked_add(num_seq.saturating_mul(176))
+        .is_none_or(|end| end > data.len())
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(num_seq);
+    for i in 0..num_seq {
+        let base = seq_index + i * 176;
+        let v = Vec3::new(
+            read_f32(data, base + 76).unwrap_or(0.0),
+            read_f32(data, base + 80).unwrap_or(0.0),
+            read_f32(data, base + 84).unwrap_or(0.0),
+        );
+        out.push(v);
+    }
+    out
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, MdlError> {
@@ -1664,8 +1739,10 @@ mod tests {
         mdl[bone_off..bone_off + 4].copy_from_slice(b"root");
         mdl[bone_off + 32..bone_off + 36].copy_from_slice(&(-1i32).to_le_bytes());
         for ch in 0..6 {
-            mdl[bone_off + 40 + ch * 4..bone_off + 44 + ch * 4].copy_from_slice(&(-1i32).to_le_bytes());
-            mdl[bone_off + 88 + ch * 4..bone_off + 92 + ch * 4].copy_from_slice(&1.0f32.to_le_bytes());
+            mdl[bone_off + 40 + ch * 4..bone_off + 44 + ch * 4]
+                .copy_from_slice(&(-1i32).to_le_bytes());
+            mdl[bone_off + 88 + ch * 4..bone_off + 92 + ch * 4]
+                .copy_from_slice(&1.0f32.to_le_bytes());
         }
         mdl[140..144].copy_from_slice(&1i32.to_le_bytes());
         mdl[144..148].copy_from_slice(&(bone_off as i32).to_le_bytes());
@@ -1722,5 +1799,148 @@ mod tests {
             ..BoneEvalParams::default()
         });
         assert!((bones[0].transform_point3(Vec3::ZERO).x - 42.0).abs() < 1e-4);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn steam_cstrike_vfs() -> Option<Vfs> {
+        let root = std::path::Path::new(r"D:\SteamLibrary\steamapps\common\Half-Life");
+        if !root.join("cstrike").is_dir() {
+            return None;
+        }
+        Vfs::discover(Some(root), cs_vfs::VfsConfig::default()).ok()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn steam_v_m4a1_usp_ak47_sequences_and_5004_events() {
+        let Some(vfs) = steam_cstrike_vfs() else {
+            return;
+        };
+
+        let m4 = StudioModel::load(&vfs, "models/v_m4a1.mdl").expect("load v_m4a1.mdl");
+        assert_eq!(m4.sequences[0].label, "idle");
+        assert_eq!(m4.sequences[4].label, "reload");
+        assert_eq!(m4.sequences[5].label, "draw");
+        assert_eq!(m4.sequences[6].label, "add_silencer");
+        assert_eq!(m4.sequences[7].label, "idle_unsil");
+        assert_eq!(m4.sequences[11].label, "reload_unsil");
+        assert_eq!(m4.sequences[12].label, "draw_unsil");
+        assert_eq!(m4.sequences[13].label, "detach_silencer");
+        assert!(
+            m4.sequences[6]
+                .events
+                .iter()
+                .any(|e| e.event == 5004 && e.options.contains("silencer_on")),
+            "v_m4a1 add_silencer missing 5004 sound event: {:?}",
+            m4.sequences[6].events
+        );
+        assert!(
+            m4.sequences[13]
+                .events
+                .iter()
+                .any(|e| e.event == 5004 && e.options.contains("silencer_off")),
+            "v_m4a1 detach_silencer missing 5004 sound event: {:?}",
+            m4.sequences[13].events
+        );
+
+        let usp = StudioModel::load(&vfs, "models/v_usp.mdl").expect("load v_usp.mdl");
+        assert_eq!(usp.sequences[0].label, "idle");
+        assert_eq!(usp.sequences[5].label, "reload");
+        assert_eq!(usp.sequences[6].label, "draw");
+        assert_eq!(usp.sequences[7].label, "add_silencer");
+        assert_eq!(usp.sequences[8].label, "idle_unsil");
+        assert_eq!(usp.sequences[13].label, "reload_unsil");
+        assert_eq!(usp.sequences[14].label, "draw_unsil");
+        assert_eq!(usp.sequences[15].label, "detach_silencer");
+
+        let ak = StudioModel::load(&vfs, "models/v_ak47.mdl").expect("load v_ak47.mdl");
+        let reload_ev: Vec<&str> = ak.sequences[1]
+            .events
+            .iter()
+            .filter(|e| e.event == 5004)
+            .map(|e| e.options.as_str())
+            .collect();
+        assert!(
+            reload_ev.iter().any(|s| s.contains("ak47_clipout")),
+            "{reload_ev:?}"
+        );
+        assert!(
+            reload_ev.iter().any(|s| s.contains("ak47_clipin")),
+            "{reload_ev:?}"
+        );
+        assert!(
+            ak.sequences[2]
+                .events
+                .iter()
+                .any(|e| e.event == 5004 && e.options.contains("ak47_boltpull")),
+            "v_ak47 draw missing boltpull 5004: {:?}",
+            ak.sequences[2].events
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn steam_urban_9way_aim_blend_linearmovement_and_p_ak47_bonemerge() {
+        let Some(vfs) = steam_cstrike_vfs() else {
+            return;
+        };
+        let urban_bytes = vfs
+            .read_bytes("models/player/urban/urban.mdl")
+            .expect("urban.mdl bytes");
+        let linear = studio_sequence_linear_movements(&urban_bytes);
+        let urban = StudioModel::load(&vfs, "models/player/urban/urban.mdl").expect("urban.mdl");
+        let p_ak = StudioModel::load(&vfs, "models/p_ak47.mdl").expect("p_ak47.mdl");
+
+        assert!((linear[3].x - 64.0).abs() < 2.0);
+        assert!((linear[4].x - 150.0).abs() < 2.0);
+        assert!((linear[5].x - 75.0).abs() < 2.0);
+
+        let aim_seq = urban
+            .sequences
+            .iter()
+            .position(|s| s.label == "ref_aim_ak47")
+            .expect("ref_aim_ak47 sequence");
+        assert_eq!(urban.sequences[aim_seq].blends.len(), 9);
+        let rhand = urban
+            .bones
+            .iter()
+            .position(|b| b.name == "Bip01 R Hand")
+            .expect("Bip01 R Hand");
+
+        let pos_at = |blending: [u8; 2]| {
+            let bones = urban.evaluate_bones_full(&BoneEvalParams {
+                sequence: aim_seq,
+                blending,
+                ..BoneEvalParams::default()
+            });
+            bones[rhand].transform_point3(Vec3::ZERO)
+        };
+        let up = pos_at([127, 0]);
+        let level = pos_at([127, 127]);
+        let down = pos_at([127, 255]);
+        assert!(
+            up.z > level.z + 3.0 && level.z > down.z + 2.0,
+            "9-way pitch blend must lift R Hand Z monotonically (up={up:?}, level={level:?}, down={down:?})"
+        );
+        let left = pos_at([0, 127]);
+        let right = pos_at([255, 127]);
+        assert!(
+            (left.y - right.y).abs() > 4.0,
+            "9-way yaw blend must swivel R Hand Y (left={left:?}, right={right:?})"
+        );
+
+        let parent_bones = urban.evaluate_bones_full(&BoneEvalParams {
+            sequence: aim_seq,
+            blending: [127, 64],
+            gait: Some((4, 12.0)),
+            ..BoneEvalParams::default()
+        });
+        let merged = p_ak.evaluate_bones_merged(&urban, &parent_bones);
+        let p_rhand = p_ak
+            .bones
+            .iter()
+            .position(|b| b.name.eq_ignore_ascii_case("Bip01 R Hand"))
+            .expect("p_ak47 Bip01 R Hand");
+        assert!((merged[p_rhand] - parent_bones[rhand]).abs_diff_eq(Mat4::ZERO, 1e-5));
     }
 }

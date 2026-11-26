@@ -157,7 +157,15 @@ impl EventQueue {
 
     /// `CL_QueueEvent`: the first empty slot; a reliable event takes the first slot that does
     /// not hold a reliable one when there is none empty.
-    pub fn queue(&mut self, flags: u32, index: u16, delay: f32, time: f64, args: EventArgs, velocity: Vec3) {
+    pub fn queue(
+        &mut self,
+        flags: u32,
+        index: u16,
+        delay: f32,
+        time: f64,
+        args: EventArgs,
+        velocity: Vec3,
+    ) {
         // A slot with index 0 is an empty one in the original, so such an event cannot exist.
         if index == 0 {
             return;
@@ -208,7 +216,14 @@ impl EventQueue {
         let flags = (flags | fev::CLIENT) & !(fev::NOTHOST | fev::HOSTONLY | fev::GLOBAL);
         args.entindex = i32::from(env.local_player);
         args.ducking = i32::from(env.local_view_ofs.z < DEFAULT_VIEWHEIGHT - 1.0);
-        self.queue(flags, index, delay.max(0.0), env.time, args, env.local_velocity);
+        self.queue(
+            flags,
+            index,
+            delay.max(0.0),
+            env.time,
+            args,
+            env.local_velocity,
+        );
     }
 
     /// Reacts to a parsed `svc_event` or `svc_event_reliable`; other messages are ignored.
@@ -469,7 +484,10 @@ enum Anim {
     /// A random sequence of `first..=last`.
     Random(i32, i32),
     /// `bparam1` (the magazine is empty) picks the empty sequence.
-    EmptyAware { shoot: (i32, i32), empty: i32 },
+    EmptyAware {
+        shoot: (i32, i32),
+        empty: i32,
+    },
     /// M4A1: `bparam1` is "silenced".
     M4a1,
     Usp,
@@ -561,10 +579,41 @@ macro_rules! weapon {
 /// The weapon events of the CS 1.6 client (`events/event_*.cpp`, read 2026-11-23). The
 /// animation numbers are the `*_SHOOT*` of the weapons' view models (`dlls/wpn_shared.h`).
 static WEAPONS: &[Weapon] = &[
-    weapon!("ak47", &["weapons/ak47-1.wav", "weapons/ak47-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 20.0, -8.0, 10.0), BulletType::Mm762, 2),
-    weapon!("aug", &["weapons/aug-1.wav"], Anim::Random(3, 5), std_shell(RSHELL, 17.0, -8.0, 14.0), BulletType::Mm556, 2),
-    weapon!("awp", &["weapons/awp1.wav"], Anim::Random(1, 3), None, BulletType::Mag338, 3),
-    weapon!("deagle", &["weapons/deagle-1.wav", "weapons/deagle-2.wav"], Anim::EmptyAware { shoot: (1, 2), empty: 3 }, std_shell(PSHELL, 35.0, -11.0, 16.0), BulletType::Ae50, 2),
+    weapon!(
+        "ak47",
+        &["weapons/ak47-1.wav", "weapons/ak47-2.wav"],
+        Anim::Random(3, 5),
+        std_shell(RSHELL, 20.0, -8.0, 10.0),
+        BulletType::Mm762,
+        2
+    ),
+    weapon!(
+        "aug",
+        &["weapons/aug-1.wav"],
+        Anim::Random(3, 5),
+        std_shell(RSHELL, 17.0, -8.0, 14.0),
+        BulletType::Mm556,
+        2
+    ),
+    weapon!(
+        "awp",
+        &["weapons/awp1.wav"],
+        Anim::Random(1, 3),
+        None,
+        BulletType::Mag338,
+        3
+    ),
+    weapon!(
+        "deagle",
+        &["weapons/deagle-1.wav", "weapons/deagle-2.wav"],
+        Anim::EmptyAware {
+            shoot: (1, 2),
+            empty: 3
+        },
+        std_shell(PSHELL, 35.0, -11.0, 16.0),
+        BulletType::Ae50,
+        2
+    ),
     Weapon {
         name: "elite_left",
         sounds: &["weapons/elite_fire.wav"],
@@ -585,53 +634,204 @@ static WEAPONS: &[Weapon] = &[
     },
     Weapon {
         aim_div: 1.0e7,
-        ..weapon!("famas", &["weapons/famas-1.wav", "weapons/famas-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 17.0, -8.0, 14.0), BulletType::Mm556, 2)
+        ..weapon!(
+            "famas",
+            &["weapons/famas-1.wav", "weapons/famas-2.wav"],
+            Anim::Random(3, 5),
+            std_shell(RSHELL, 17.0, -8.0, 14.0),
+            BulletType::Mm556,
+            2
+        )
     },
-    weapon!("fiveseven", &["weapons/fiveseven-1.wav"], Anim::EmptyAware { shoot: (1, 2), empty: 3 }, std_shell(PSHELL, 36.0, -14.0, 14.0), BulletType::Mm57, 2),
-    weapon!("g3sg1", &["weapons/g3sg1-1.wav"], Anim::Random(1, 2), shell(RSHELL, [20.0, -8.0, -10.0], [17.0, -8.0, 10.0]), BulletType::Mm762, 2),
+    weapon!(
+        "fiveseven",
+        &["weapons/fiveseven-1.wav"],
+        Anim::EmptyAware {
+            shoot: (1, 2),
+            empty: 3
+        },
+        std_shell(PSHELL, 36.0, -14.0, 14.0),
+        BulletType::Mm57,
+        2
+    ),
+    weapon!(
+        "g3sg1",
+        &["weapons/g3sg1-1.wav"],
+        Anim::Random(1, 2),
+        shell(RSHELL, [20.0, -8.0, -10.0], [17.0, -8.0, 10.0]),
+        BulletType::Mm762,
+        2
+    ),
     Weapon {
         aim_div: 1.0e7,
-        ..weapon!("galil", &["weapons/galil-1.wav", "weapons/galil-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 20.0, -8.0, 10.0), BulletType::Mm556, 2)
+        ..weapon!(
+            "galil",
+            &["weapons/galil-1.wav", "weapons/galil-2.wav"],
+            Anim::Random(3, 5),
+            std_shell(RSHELL, 20.0, -8.0, 10.0),
+            BulletType::Mm556,
+            2
+        )
     },
     Weapon {
         pick: Pick::Glock,
         distance: 4096.0,
-        ..weapon!("glock18", &["weapons/glock18-1.wav", "weapons/glock18-2.wav"], Anim::Glock, std_shell(PSHELL, 36.0, -14.0, 14.0), BulletType::Nine, 2)
+        ..weapon!(
+            "glock18",
+            &["weapons/glock18-1.wav", "weapons/glock18-2.wav"],
+            Anim::Glock,
+            std_shell(PSHELL, 36.0, -14.0, 14.0),
+            BulletType::Nine,
+            2
+        )
     },
     Weapon {
         aim_div: 0.0,
-        ..weapon!("knife", &["weapons/knife_miss1.wav"], Anim::Knife, None, BulletType::Nine, 0)
+        ..weapon!(
+            "knife",
+            &["weapons/knife_miss1.wav"],
+            Anim::Knife,
+            None,
+            BulletType::Nine,
+            0
+        )
     },
-    weapon!("m249", &["weapons/m249-1.wav", "weapons/m249-2.wav"], Anim::Random(1, 2), std_shell(RSHELL, 20.0, -10.0, 13.0), BulletType::Mm556, 2),
+    weapon!(
+        "m249",
+        &["weapons/m249-1.wav", "weapons/m249-2.wav"],
+        Anim::Random(1, 2),
+        std_shell(RSHELL, 20.0, -10.0, 13.0),
+        BulletType::Mm556,
+        2
+    ),
     Weapon {
         shots: 9,
         spread: Spread::Fixed(0.0675),
-        ..weapon!("m3", &["weapons/m3-1.wav"], Anim::Random(1, 2), None, BulletType::Buckshot, 1)
+        ..weapon!(
+            "m3",
+            &["weapons/m3-1.wav"],
+            Anim::Random(1, 2),
+            None,
+            BulletType::Buckshot,
+            1
+        )
     },
     Weapon {
         pick: Pick::M4a1,
-        ..weapon!("m4a1", &["weapons/m4a1-1.wav", "weapons/m4a1_unsil-1.wav", "weapons/m4a1_unsil-2.wav"], Anim::M4a1, std_shell(RSHELL, 20.0, -8.0, 10.0), BulletType::Mm556, 2)
+        ..weapon!(
+            "m4a1",
+            &[
+                "weapons/m4a1-1.wav",
+                "weapons/m4a1_unsil-1.wav",
+                "weapons/m4a1_unsil-2.wav"
+            ],
+            Anim::M4a1,
+            std_shell(RSHELL, 20.0, -8.0, 10.0),
+            BulletType::Mm556,
+            2
+        )
     },
-    weapon!("mac10", &["weapons/mac10-1.wav"], Anim::Random(3, 5), std_shell(RSHELL, 32.0, -9.0, 11.0), BulletType::Acp45, 2),
-    weapon!("mp5n", &["weapons/mp5-1.wav", "weapons/mp5-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 36.0, -10.0, 11.0), BulletType::Nine, 2),
-    weapon!("p228", &["weapons/p228-1.wav"], Anim::P228, std_shell(PSHELL, 36.0, -14.0, 14.0), BulletType::Sig357, 2),
-    weapon!("p90", &["weapons/p90-1.wav"], Anim::Random(3, 5), std_shell(RSHELL, 35.0, -16.0, 22.0), BulletType::Mm57, 2),
+    weapon!(
+        "mac10",
+        &["weapons/mac10-1.wav"],
+        Anim::Random(3, 5),
+        std_shell(RSHELL, 32.0, -9.0, 11.0),
+        BulletType::Acp45,
+        2
+    ),
+    weapon!(
+        "mp5n",
+        &["weapons/mp5-1.wav", "weapons/mp5-2.wav"],
+        Anim::Random(3, 5),
+        std_shell(RSHELL, 36.0, -10.0, 11.0),
+        BulletType::Nine,
+        2
+    ),
+    weapon!(
+        "p228",
+        &["weapons/p228-1.wav"],
+        Anim::P228,
+        std_shell(PSHELL, 36.0, -14.0, 14.0),
+        BulletType::Sig357,
+        2
+    ),
+    weapon!(
+        "p90",
+        &["weapons/p90-1.wav"],
+        Anim::Random(3, 5),
+        std_shell(RSHELL, 35.0, -16.0, 22.0),
+        BulletType::Mm57,
+        2
+    ),
     Weapon {
         spread: Spread::ArgsMilli,
-        ..weapon!("scout", &["weapons/scout_fire-1.wav"], Anim::Random(1, 2), None, BulletType::Mm762, 2)
+        ..weapon!(
+            "scout",
+            &["weapons/scout_fire-1.wav"],
+            Anim::Random(1, 2),
+            None,
+            BulletType::Mm762,
+            2
+        )
     },
-    weapon!("sg550", &["weapons/sg550-1.wav"], Anim::Random(1, 2), shell(RSHELL, [20.0, -8.0, -10.0], [17.0, -8.0, 10.0]), BulletType::Mm556, 2),
-    weapon!("sg552", &["weapons/sg552-1.wav", "weapons/sg552-2.wav"], Anim::Random(3, 5), std_shell(RSHELL, 20.0, -8.0, 10.0), BulletType::Mm556, 2),
-    weapon!("tmp", &["weapons/tmp-1.wav", "weapons/tmp-2.wav"], Anim::Random(3, 5), std_shell(PSHELL, 32.0, -6.0, 11.0), BulletType::Nine, 2),
-    weapon!("ump45", &["weapons/ump45-1.wav"], Anim::Random(3, 5), std_shell(PSHELL, 34.0, -10.0, 11.0), BulletType::Acp45, 2),
+    weapon!(
+        "sg550",
+        &["weapons/sg550-1.wav"],
+        Anim::Random(1, 2),
+        shell(RSHELL, [20.0, -8.0, -10.0], [17.0, -8.0, 10.0]),
+        BulletType::Mm556,
+        2
+    ),
+    weapon!(
+        "sg552",
+        &["weapons/sg552-1.wav", "weapons/sg552-2.wav"],
+        Anim::Random(3, 5),
+        std_shell(RSHELL, 20.0, -8.0, 10.0),
+        BulletType::Mm556,
+        2
+    ),
+    weapon!(
+        "tmp",
+        &["weapons/tmp-1.wav", "weapons/tmp-2.wav"],
+        Anim::Random(3, 5),
+        std_shell(PSHELL, 32.0, -6.0, 11.0),
+        BulletType::Nine,
+        2
+    ),
+    weapon!(
+        "ump45",
+        &["weapons/ump45-1.wav"],
+        Anim::Random(3, 5),
+        std_shell(PSHELL, 34.0, -10.0, 11.0),
+        BulletType::Acp45,
+        2
+    ),
     Weapon {
         pick: Pick::Usp,
-        ..weapon!("usp", &["weapons/usp1.wav", "weapons/usp2.wav", "weapons/usp_unsil-1.wav"], Anim::Usp, std_shell(PSHELL, 36.0, -14.0, 14.0), BulletType::Acp45, 2)
+        ..weapon!(
+            "usp",
+            &[
+                "weapons/usp1.wav",
+                "weapons/usp2.wav",
+                "weapons/usp_unsil-1.wav"
+            ],
+            Anim::Usp,
+            std_shell(PSHELL, 36.0, -14.0, 14.0),
+            BulletType::Acp45,
+            2
+        )
     },
     Weapon {
         shots: 6,
         spread: Spread::Fixed(0.0725),
-        ..weapon!("xm1014", &["weapons/xm1014-1.wav"], Anim::Random(1, 2), std_shell(SHOTGUN_SHELL, 22.0, -9.0, 11.0), BulletType::Buckshot, 1)
+        ..weapon!(
+            "xm1014",
+            &["weapons/xm1014-1.wav"],
+            Anim::Random(1, 2),
+            std_shell(SHOTGUN_SHELL, 22.0, -9.0, 11.0),
+            BulletType::Buckshot,
+            1
+        )
     },
 ];
 
@@ -677,7 +877,10 @@ fn knife(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Event
             sequence: ev.args.iparam1,
             body: 2,
         }),
-        sound: event_sound(w.sounds[rng.long(0, w.sounds.len() as i32 - 1) as usize], ev),
+        sound: event_sound(
+            w.sounds[rng.long(0, w.sounds.len() as i32 - 1) as usize],
+            ev,
+        ),
     }
 }
 
@@ -753,7 +956,11 @@ pub fn gun_position(origin: Vec3, local: bool, ducking: bool, env: &FxEnv) -> Ve
     if local {
         origin + env.local_view_ofs
     } else {
-        let h = if ducking { DUCK_VIEWHEIGHT } else { DEFAULT_VIEWHEIGHT };
+        let h = if ducking {
+            DUCK_VIEWHEIGHT
+        } else {
+            DEFAULT_VIEWHEIGHT
+        };
         origin + Vec3::new(0.0, 0.0, h)
     }
 }
@@ -775,7 +982,11 @@ fn eject_shell(
     let [f, u, r] = offsets;
     let side = if r < 0.0 { -1.0 } else { 1.0 };
     let origin = eye + forward * f + up * u + right * r;
-    let base = if local { env.local_velocity } else { Vec3::ZERO };
+    let base = if local {
+        env.local_velocity
+    } else {
+        Vec3::ZERO
+    };
     let velocity = base
         + right * (side * rng.float(50.0, 100.0))
         + up * rng.float(100.0, 150.0)
@@ -815,7 +1026,8 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
     let (view_anim, muzzle_flash) = if local {
         let seq = pick_anim(w, a, env, rng);
         let flash = match w.anim {
-            // Unsilenced USP (`bparam2` clear) and no shield makes a muzzle flash.
+            // Silenced M4A1 (`bparam1 != 0`) and silenced/shielded USP omit muzzle flash.
+            Anim::M4a1 => a.bparam1 == 0,
             Anim::Usp => a.bparam2 == 0 && !env.holding_shield,
             _ => true,
         };
@@ -826,7 +1038,11 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
 
     let shell = w.shell.map(|s| {
         // Another player's gun is always drawn on the right-hand side.
-        let offsets = if !local || env.right_hand { s.right } else { s.left };
+        let offsets = if !local || env.right_hand {
+            s.right
+        } else {
+            s.left
+        };
         eject_shell(&s, offsets, eye, (forward, right, up), env, local, rng)
     });
 
@@ -835,7 +1051,11 @@ fn fire(w: &Weapon, ev: &QueuedEvent, env: &FxEnv, rng: &mut FxRandom) -> Weapon
     // `EV_FireElite` moves the muzzle five units to its own side.
     let mut gun = eye;
     if matches!(w.anim, Anim::Elite) {
-        gun += if w.name == "elite_right" { right * 5.0 } else { right * -5.0 };
+        gun += if w.name == "elite_right" {
+            right * 5.0
+        } else {
+            right * -5.0
+        };
     }
     let spread = match w.spread {
         Spread::Args => [a.fparam1, a.fparam2],
@@ -1020,7 +1240,12 @@ mod tests {
         }
     }
 
-    fn wire(index: u16, packet_index: Option<u16>, args: Option<EventArgs>, delay: Option<u16>) -> SvcMessage {
+    fn wire(
+        index: u16,
+        packet_index: Option<u16>,
+        args: Option<EventArgs>,
+        delay: Option<u16>,
+    ) -> SvcMessage {
         SvcMessage::Event(vec![WireEvent {
             index,
             packet_index,
@@ -1063,8 +1288,13 @@ mod tests {
         assert_eq!(fx.weapon, "ak47");
         assert_eq!(fx.entity, 3);
         assert!(fx.local);
-        let anim = fx.view_anim.expect("the local player sees the view-model animation");
-        assert!((3..=5).contains(&anim.sequence), "AK47_SHOOT1..3, got {anim:?}");
+        let anim = fx
+            .view_anim
+            .expect("the local player sees the view-model animation");
+        assert!(
+            (3..=5).contains(&anim.sequence),
+            "AK47_SHOOT1..3, got {anim:?}"
+        );
         assert_eq!(anim.body, 2);
         assert!(fx.muzzle_flash);
 
@@ -1184,7 +1414,14 @@ mod tests {
         let slot0 = q.slots[0].as_ref().unwrap();
         assert_eq!((slot0.index, slot0.flags), (3, fev::RELIABLE | fev::SERVER));
         // A second reliable one skips the first and takes the next unreliable slot.
-        q.queue(fev::RELIABLE | fev::SERVER, 4, 0.0, 0.0, EventArgs::default(), Vec3::ZERO);
+        q.queue(
+            fev::RELIABLE | fev::SERVER,
+            4,
+            0.0,
+            0.0,
+            EventArgs::default(),
+            Vec3::ZERO,
+        );
         assert_eq!(q.slots[1].as_ref().unwrap().index, 4);
     }
 
@@ -1226,16 +1463,27 @@ mod tests {
         };
         for _ in 0..20 {
             // bparam1 = silenced.
-            let EventFx::Weapon(sil) = resolve("events/m4a1.sc", &ev(1, 1, 0), &env, &mut rng) else {
+            let EventFx::Weapon(sil) = resolve("events/m4a1.sc", &ev(1, 1, 0), &env, &mut rng)
+            else {
                 panic!();
             };
             assert!((1..=3).contains(&sil.view_anim.unwrap().sequence));
-            assert_eq!(sil.sound.unwrap().name.as_deref(), Some("weapons/m4a1-1.wav"));
-            let EventFx::Weapon(un) = resolve("events/m4a1.sc", &ev(1, 0, 0), &env, &mut rng) else {
+            assert_eq!(
+                sil.sound.unwrap().name.as_deref(),
+                Some("weapons/m4a1-1.wav")
+            );
+            let EventFx::Weapon(un) = resolve("events/m4a1.sc", &ev(1, 0, 0), &env, &mut rng)
+            else {
                 panic!();
             };
             assert!((8..=10).contains(&un.view_anim.unwrap().sequence));
-            assert!(un.sound.unwrap().name.unwrap().starts_with("weapons/m4a1_unsil-"));
+            assert!(
+                un.sound
+                    .unwrap()
+                    .name
+                    .unwrap()
+                    .starts_with("weapons/m4a1_unsil-")
+            );
         }
         // USP: `bparam2` clear is unsilenced (makes a muzzle flash); `bparam2` non-zero is silenced (no flash).
         let EventFx::Weapon(on) = resolve("events/usp.sc", &ev(2, 0, 0), &env, &mut rng) else {
@@ -1243,7 +1491,10 @@ mod tests {
         };
         assert!(on.muzzle_flash);
         assert!((9..=11).contains(&on.view_anim.unwrap().sequence));
-        assert_eq!(on.sound.unwrap().name.as_deref(), Some("weapons/usp_unsil-1.wav"));
+        assert_eq!(
+            on.sound.unwrap().name.as_deref(),
+            Some("weapons/usp_unsil-1.wav")
+        );
         let EventFx::Weapon(off) = resolve("events/usp.sc", &ev(2, 1, 1), &env, &mut rng) else {
             panic!();
         };
@@ -1275,10 +1526,18 @@ mod tests {
             panic!();
         };
         let b = m3.bullets.unwrap();
-        assert_eq!((b.shots, b.bullet, b.penetration), (9, BulletType::Buckshot, 1));
+        assert_eq!(
+            (b.shots, b.bullet, b.penetration),
+            (9, BulletType::Buckshot, 1)
+        );
         assert_eq!(b.spread, [0.0675, 0.0675]);
         assert!(m3.shell.is_none());
-        let EventFx::Knife { local, view_anim, sound } = resolve("events/knife.sc", &ev(args), &env, &mut rng) else {
+        let EventFx::Knife {
+            local,
+            view_anim,
+            sound,
+        } = resolve("events/knife.sc", &ev(args), &env, &mut rng)
+        else {
             panic!();
         };
         assert!(local);
@@ -1290,10 +1549,35 @@ mod tests {
     fn every_server_event_has_a_handler_or_is_named() {
         // The scripts `cs-game` precaches.
         let names = [
-            "ak47", "aug", "awp", "createexplo", "createsmoke", "deagle", "decal_reset",
-            "elite_left", "elite_right", "famas", "fiveseven", "g3sg1", "galil", "glock18",
-            "knife", "m249", "m3", "m4a1", "mac10", "mp5n", "p228", "p90", "scout", "sg550",
-            "sg552", "tmp", "ump45", "usp", "xm1014",
+            "ak47",
+            "aug",
+            "awp",
+            "createexplo",
+            "createsmoke",
+            "deagle",
+            "decal_reset",
+            "elite_left",
+            "elite_right",
+            "famas",
+            "fiveseven",
+            "g3sg1",
+            "galil",
+            "glock18",
+            "knife",
+            "m249",
+            "m3",
+            "m4a1",
+            "mac10",
+            "mp5n",
+            "p228",
+            "p90",
+            "scout",
+            "sg550",
+            "sg552",
+            "tmp",
+            "ump45",
+            "usp",
+            "xm1014",
         ];
         let entities = BTreeMap::new();
         let precache = PrecacheTables::default();

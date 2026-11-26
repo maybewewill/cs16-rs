@@ -113,7 +113,8 @@ impl GoldSrcSprite {
             let group = read_i32(data, offset)?;
             offset += 4;
             if group == 0 {
-                let (frame, next) = read_single_frame(data, offset, palette, pal_colors, tex_format)?;
+                let (frame, next) =
+                    read_single_frame(data, offset, palette, pal_colors, tex_format)?;
                 frames.push(frame);
                 offset = next;
             } else {
@@ -162,9 +163,13 @@ fn read_single_frame(
     let mut rgba = Vec::with_capacity(pix_count * 4);
     let last_color_off = pal_colors.saturating_sub(1) * 3;
     for &idx in &data[pix_start..pix_end] {
-        let ci = (idx as usize).min(pal_colors.saturating_sub(1));
-        let p = ci * 3;
-        let (r, g, b) = (palette[p], palette[p + 1], palette[p + 2]);
+        let (r, g, b) = if pal_colors > 0 {
+            let ci = (idx as usize).min(pal_colors - 1);
+            let p = ci * 3;
+            (palette[p], palette[p + 1], palette[p + 2])
+        } else {
+            (255, 255, 255)
+        };
         match tex_format {
             SpriteTexFormat::Additive => {
                 // Luminance becomes alpha so additive sprites compose cleanly in 2D UI & 3D
@@ -172,9 +177,15 @@ fn read_single_frame(
                 rgba.extend_from_slice(&[r, g, b, a]);
             }
             SpriteTexFormat::IndexAlpha => {
-                let br = palette[last_color_off];
-                let bg = palette[last_color_off + 1];
-                let bb = palette[last_color_off + 2];
+                let (br, bg, bb) = if pal_colors > 0 {
+                    (
+                        palette[last_color_off],
+                        palette[last_color_off + 1],
+                        palette[last_color_off + 2],
+                    )
+                } else {
+                    (255, 255, 255)
+                };
                 rgba.extend_from_slice(&[br, bg, bb, idx]);
             }
             SpriteTexFormat::AlphaTest => {
@@ -246,6 +257,83 @@ mod tests {
             assert_eq!(spr.sprite_type, want, "raw type {raw}");
             assert_eq!(spr.frames.len(), 1);
             assert_eq!((spr.frames[0].origin_x, spr.frames[0].origin_y), (-1, 1));
+        }
+    }
+
+    #[test]
+    fn index_alpha_uses_last_palette_entry_rgb_and_pixel_index_as_alpha() {
+        let mut d = Vec::new();
+        d.extend_from_slice(SPR_MAGIC);
+        for v in [SPR_VERSION, 2, 2, 0, 2, 1, 1, 0, 0] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(&256u16.to_le_bytes());
+        for i in 0..255u8 {
+            d.extend_from_slice(&[i, i, i]);
+        }
+        d.extend_from_slice(&[255, 255, 255]); // palette[255] = white base tint
+        d.extend_from_slice(&0i32.to_le_bytes());
+        for v in [-1i32, 1, 2, 1] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(&[0u8, 180u8]);
+        let spr = GoldSrcSprite::parse(&d).expect("parse index_alpha");
+        assert_eq!(spr.tex_format, SpriteTexFormat::IndexAlpha);
+        assert_eq!(&spr.frames[0].rgba[0..4], &[255, 255, 255, 0]);
+        assert_eq!(&spr.frames[0].rgba[4..8], &[255, 255, 255, 180]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn steam_blood_sprites_modulate_to_crimson_with_zero_white_puff() {
+        let steam = std::path::Path::new(r"D:\SteamLibrary\steamapps\common\Half-Life");
+        if !steam.exists() {
+            return;
+        }
+        let Ok(vfs) = Vfs::open(steam, cs_vfs::VfsConfig::default()) else {
+            return;
+        };
+        let pal = vfs
+            .read_bytes("gfx/palette.lmp")
+            .expect("valve/gfx/palette.lmp");
+        assert!(pal.len() >= 768);
+        // Blood ramp indices 247..=250 must be pure dark crimson in palette.lmp.
+        let blood_rgb = [pal[249 * 3], pal[249 * 3 + 1], pal[249 * 3 + 2]];
+        assert!(
+            blood_rgb[0] > 150 && blood_rgb[1] < 10 && blood_rgb[2] < 10,
+            "{blood_rgb:?}"
+        );
+
+        for path in ["sprites/bloodspray.spr", "sprites/blood.spr"] {
+            let spr = GoldSrcSprite::load(&vfs, path).expect("load blood sprite");
+            assert!(!spr.frames.is_empty(), "{path} has frames");
+            let mut crimson_pixels = 0usize;
+            let mut white_or_grey_pixels = 0usize;
+            let mut transparent_pixels = 0usize;
+            for px in spr.frames[0].rgba.as_chunks::<4>().0 {
+                if px[3] == 0 {
+                    transparent_pixels += 1;
+                    continue;
+                }
+                let r = (u32::from(px[0]) * u32::from(blood_rgb[0]) / 255) as u8;
+                let g = (u32::from(px[1]) * u32::from(blood_rgb[1]) / 255) as u8;
+                let b = (u32::from(px[2]) * u32::from(blood_rgb[2]) / 255) as u8;
+                if r > 100 && g < 30 && b < 30 {
+                    crimson_pixels += 1;
+                }
+                if g >= 30 || b >= 30 {
+                    white_or_grey_pixels += 1;
+                }
+            }
+            assert!(transparent_pixels > 0, "{path} must have transparent edges");
+            assert!(
+                crimson_pixels > 0,
+                "{path} must produce rich crimson pixels"
+            );
+            assert_eq!(
+                white_or_grey_pixels, 0,
+                "{path} must never produce white/grey pixels"
+            );
         }
     }
 }

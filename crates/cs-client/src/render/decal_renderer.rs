@@ -233,7 +233,9 @@ fn push_transformed_decal_vertices(
     out.reserve(local_verts.len());
     for v in local_verts {
         out.push(DecalGpuVertex {
-            position: matrix.transform_point3(Vec3::from_array(v.position)).to_array(),
+            position: matrix
+                .transform_point3(Vec3::from_array(v.position))
+                .to_array(),
             uv: v.uv,
             color: v.color,
         });
@@ -241,7 +243,10 @@ fn push_transformed_decal_vertices(
 }
 
 /// Transform entity-local decal vertices into world space using `matrix` (`brush_matrix`).
-pub fn transform_decal_vertices(local_verts: &[DecalGpuVertex], matrix: Mat4) -> Vec<DecalGpuVertex> {
+pub fn transform_decal_vertices(
+    local_verts: &[DecalGpuVertex],
+    matrix: Mat4,
+) -> Vec<DecalGpuVertex> {
     let mut out = Vec::with_capacity(local_verts.len());
     push_transformed_decal_vertices(local_verts, matrix, &mut out);
     out
@@ -535,8 +540,13 @@ impl DecalRenderer {
             immediate_size: 0,
         });
         let msaa_samples = 1;
-        let pipeline =
-            create_decal_pipeline(device, &shader, &pipeline_layout, color_format, msaa_samples);
+        let pipeline = create_decal_pipeline(
+            device,
+            &shader,
+            &pipeline_layout,
+            color_format,
+            msaa_samples,
+        );
 
         let filter_mode = TextureFilterMode::LinearMipmapLinear;
         let sampler = create_sampler(device, "decal_sampler", filter_mode, 1, true);
@@ -606,11 +616,7 @@ impl DecalRenderer {
         std::mem::take(&mut self.frame_upload_bytes)
     }
 
-    pub fn sync_gamma(
-        &mut self,
-        gamma_cfg: GoldSrcGammaConfig,
-        tex_cfg: TextureUploadConfig,
-    ) {
+    pub fn sync_gamma(&mut self, gamma_cfg: GoldSrcGammaConfig, tex_cfg: TextureUploadConfig) {
         let gamma_cfg = gamma_cfg.validated();
         let gamma_changed = self.cached_gamma != gamma_cfg;
         if gamma_changed {
@@ -653,17 +659,11 @@ impl DecalRenderer {
     }
 
     pub fn set_texture_filter(&mut self, device: &wgpu::Device, mode: TextureFilterMode) {
-        let clamped_mode = match mode {
-            TextureFilterMode::Nearest
-            | TextureFilterMode::NearestMipmapNearest
-            | TextureFilterMode::NearestMipmapLinear => TextureFilterMode::Nearest,
-            _ => TextureFilterMode::Linear,
-        };
-        if self.filter_mode == clamped_mode {
+        if self.filter_mode == mode {
             return;
         }
-        self.filter_mode = clamped_mode;
-        self.sampler = create_sampler(device, "decal_sampler", clamped_mode, 1, true);
+        self.filter_mode = mode;
+        self.sampler = create_sampler(device, "decal_sampler", mode, 1, true);
         for (idx, tex) in self.textures.iter_mut().enumerate() {
             tex.bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&format!("decal_tex_bg_{idx}")),
@@ -724,7 +724,11 @@ impl DecalRenderer {
 
         let mut decoded = None;
         if spray_player.is_some() {
-            for wad in [&self.tempdecal_wad, &self.pldecal_wad].into_iter().flatten().flatten() {
+            for wad in [&self.tempdecal_wad, &self.pldecal_wad]
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 if let Some(&first) = wad.entry_names().first()
                     && let Ok(Some(d)) = wad.decode_decal(first)
                 {
@@ -834,14 +838,13 @@ impl DecalRenderer {
             return;
         };
         let has_brush_spawns = spawns.iter().any(|s| s.entity_index > 0);
-        let has_brush_lookup = if has_brush_spawns
-            && let (Some(ents), Some(reg)) = (scene_entities, registry)
-        {
-            fill_brush_entity_lookup(ents, reg, &mut self.scratch_brush_lookup);
-            true
-        } else {
-            false
-        };
+        let has_brush_lookup =
+            if has_brush_spawns && let (Some(ents), Some(reg)) = (scene_entities, registry) {
+                fill_brush_entity_lookup(ents, reg, &mut self.scratch_brush_lookup);
+                true
+            } else {
+                false
+            };
         let max_transient = r_decals.min(4096);
         for s in spawns {
             let (tex_id, tint) = self.ensure_decal_texture(
@@ -875,8 +878,7 @@ impl DecalRenderer {
                 let local_origin = world_to_brush_local(s.origin, ent_tf.origin, ent_tf.angles);
                 let faces =
                     query_submodel_faces_in_sphere(map, submodel, local_origin, half_size * 1.5);
-                let verts =
-                    project_decal_onto_faces(&faces, local_origin, half_size, 0.35, tint);
+                let verts = project_decal_onto_faces(&faces, local_origin, half_size, 0.35, tint);
                 (verts, ent_tf.matrix, ent_tf.translucent)
             } else {
                 let mut faces = map.query_faces_in_sphere(s.origin, half_size * 1.5);
@@ -1003,23 +1005,33 @@ impl DecalRenderer {
         self.solid_entity_batches.clear();
         self.trans_entity_batches.clear();
         self.scratch_verts.clear();
-        let push_batch = |batches: &mut Vec<(u32, u32, u32)>, tex_id: u32, first: u32, count: u32| {
-            if let Some(last) = batches.last_mut()
-                && last.0 == tex_id
-                && last.1 + last.2 == first
-            {
-                last.2 += count;
-            } else {
-                batches.push((tex_id, first, count));
-            }
-        };
+        let push_batch =
+            |batches: &mut Vec<(u32, u32, u32)>, tex_id: u32, first: u32, count: u32| {
+                if let Some(last) = batches.last_mut()
+                    && last.0 == tex_id
+                    && last.1 + last.2 == first
+                {
+                    last.2 += count;
+                } else {
+                    batches.push((tex_id, first, count));
+                }
+            };
         for d in &self.placed {
             let first = self.scratch_verts.len() as u32;
             if d.entity_index == 0 {
                 self.scratch_verts.extend_from_slice(&d.local_verts);
-                push_batch(&mut self.world_batches, d.tex_id, first, d.local_verts.len() as u32);
+                push_batch(
+                    &mut self.world_batches,
+                    d.tex_id,
+                    first,
+                    d.local_verts.len() as u32,
+                );
             } else {
-                push_transformed_decal_vertices(&d.local_verts, d.last_matrix, &mut self.scratch_verts);
+                push_transformed_decal_vertices(
+                    &d.local_verts,
+                    d.last_matrix,
+                    &mut self.scratch_verts,
+                );
                 let count = (self.scratch_verts.len() as u32) - first;
                 if d.translucent {
                     push_batch(&mut self.trans_entity_batches, d.tex_id, first, count);

@@ -54,8 +54,9 @@ struct VsOut {
 
 const TEX_FLAG_FLATSHADE: u32 = 1u;
 const TEX_FLAG_CHROME: u32 = 2u;
+const TEX_FLAG_FULLBRIGHT: u32 = 4u;
 const TEX_FLAG_ADDITIVE: u32 = 32u;
-const TEX_FLAG_FULLBRIGHT: u32 = 64u;
+const TEX_FLAG_MASKED: u32 = 64u;
 const SHADE_LAMBERT: f32 = 1.4953241;
 
 fn normalize_or_zero(v: vec3<f32>) -> vec3<f32> {

@@ -32,7 +32,9 @@ use tracing::info;
 use winit::window::Window;
 
 use crate::camera::Camera;
-use crate::render::bsp_renderer::{BspDrawParams, BspRenderStats, BspRenderer, PreparedBrushEntity};
+use crate::render::bsp_renderer::{
+    BspDrawParams, BspRenderStats, BspRenderer, PreparedBrushEntity,
+};
 use crate::render::decal_renderer::{DecalRenderer, DecalSpawn};
 use crate::render::fx_renderer::{FxBeam, FxDrawParams, FxPoint, FxRenderer};
 use crate::render::lighting::{GpuLightsUniform, TextureFilterMode, TextureUploadConfig};
@@ -219,10 +221,7 @@ pub fn required_limits_for_adapter(adapter: &wgpu::Adapter) -> wgpu::Limits {
 /// Selects the swapchain [`wgpu::PresentMode`] for `gl_vsync`:
 /// - `gl_vsync 0`: prefers `Immediate` -> `Mailbox` -> `Fifo` (sub-ms classic scanout)
 /// - `gl_vsync 1`: `Fifo`
-pub fn select_present_mode(
-    supported: &[wgpu::PresentMode],
-    vsync: bool,
-) -> wgpu::PresentMode {
+pub fn select_present_mode(supported: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
     if vsync {
         wgpu::PresentMode::Fifo
     } else if supported.contains(&wgpu::PresentMode::Immediate) {
@@ -462,7 +461,8 @@ impl Renderer {
 
     fn ensure_msaa_targets(&mut self, samples: u32) {
         let target_samples = if samples >= 4 { 4 } else { 1 };
-        if self.msaa_samples == target_samples && (target_samples == 1 || self.msaa_color_view.is_some())
+        if self.msaa_samples == target_samples
+            && (target_samples == 1 || self.msaa_color_view.is_some())
         {
             return;
         }
@@ -487,8 +487,10 @@ impl Renderer {
         self.bsp.rebuild_pipelines(&self.device, target_samples);
         self.skybox.rebuild_pipelines(&self.device, target_samples);
         self.decals.rebuild_pipelines(&self.device, target_samples);
-        self.mdl_view.rebuild_pipelines(&self.device, target_samples);
-        self.mdl_scene.rebuild_pipelines(&self.device, target_samples);
+        self.mdl_view
+            .rebuild_pipelines(&self.device, target_samples);
+        self.mdl_scene
+            .rebuild_pipelines(&self.device, target_samples);
         self.sprites.rebuild_pipelines(&self.device, target_samples);
         self.fx.rebuild_pipelines(&self.device, target_samples);
     }
@@ -706,11 +708,14 @@ impl Renderer {
 
         let filter_mode = settings.texture_mode;
         let aniso = settings.anisotropy.clamp(1, 16);
-        self.bsp.set_texture_filter(&self.device, filter_mode, aniso);
+        self.bsp
+            .set_texture_filter(&self.device, filter_mode, aniso);
         self.skybox.set_texture_filter(&self.device, filter_mode);
         self.decals.set_texture_filter(&self.device, filter_mode);
-        self.mdl_view.set_texture_filter(&self.device, filter_mode, aniso);
-        self.mdl_scene.set_texture_filter(&self.device, filter_mode, aniso);
+        self.mdl_view
+            .set_texture_filter(&self.device, filter_mode, aniso);
+        self.mdl_scene
+            .set_texture_filter(&self.device, filter_mode, aniso);
         self.sprites.set_texture_filter(&self.device, filter_mode);
 
         let cam_fwd = camera.forward();
@@ -766,12 +771,8 @@ impl Renderer {
                 tex_cfg,
                 bsp_dlights,
             );
-            self.bsp.prepare_world_pvs(
-                &self.device,
-                &self.queue,
-                camera.position,
-                settings.r_vis,
-            );
+            self.bsp
+                .prepare_world_pvs(&self.device, &self.queue, camera.position, settings.r_vis);
             let proj = camera.proj_matrix(vw, vh, settings.fov_deg, settings.aspect_mode);
             let view_mat = camera.view_matrix();
             let view_proj = proj * view_mat;
@@ -856,6 +857,9 @@ impl Renderer {
                     software_mode: settings.software_mode,
                     fog: settings.fog,
                     lights: scene.lights,
+                    // GoldSrc `R_StudioSetupLighting` minimum viewmodel ambient floor (`ambientlight >= 24`)
+                    // so first-person guns stay legible in dark tunnels without flat fullbright shading.
+                    min_ambient_light: 24.0,
                 };
                 prepared_viewmodel = Some(self.mdl_view.prepare_studio(
                     &self.device,
@@ -930,6 +934,7 @@ impl Renderer {
                     software_mode: settings.software_mode,
                     fog: settings.fog,
                     lights: scene.lights,
+                    min_ambient_light: 0.0,
                 };
                 if !studio.is_empty() {
                     prepared_scene_studio = Some(self.mdl_scene.prepare_studio(
@@ -956,11 +961,12 @@ impl Renderer {
                         software_mode: settings.software_mode,
                         fog: settings.fog,
                     };
-                    let brush_colliders = if lists.sprites.iter().any(|d| d.mode == EntRenderMode::Glow) {
-                        collect_opaque_brush_colliders(&frame.entities, &self.models)
-                    } else {
-                        Vec::new()
-                    };
+                    let brush_colliders =
+                        if lists.sprites.iter().any(|d| d.mode == EntRenderMode::Glow) {
+                            collect_opaque_brush_colliders(&frame.entities, &self.models)
+                        } else {
+                            Vec::new()
+                        };
                     prepared_sprites = Some(self.sprites.prepare_from_registry(
                         &self.device,
                         &self.queue,
@@ -1139,7 +1145,8 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            // Exact GoldSrc `glDepthRange(0.0, 0.3)` so first-person weapons never clip into walls.
+            pass.set_viewport(vx, vy, vw, vh, 0.0, 0.3);
             pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
             frame_stats.mdl_draw_calls += self.mdl_view.draw_counted(&mut pass, vm_pass_data);
         }
@@ -1248,8 +1255,11 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let _ = capture_tex;
 
-        self.queue
-            .submit(extra_cmds.into_iter().chain(std::iter::once(encoder.finish())));
+        self.queue.submit(
+            extra_cmds
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
 
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some((buf, w, h, padded_bpr)), Some(out_path)) = (staging, screenshot_path) {
@@ -1509,7 +1519,14 @@ mod tests {
 
         // `gl_vsync 0` prefers Immediate -> Mailbox -> Fifo.
         assert_eq!(
-            select_present_mode(&[PresentMode::Fifo, PresentMode::Mailbox, PresentMode::Immediate], false),
+            select_present_mode(
+                &[
+                    PresentMode::Fifo,
+                    PresentMode::Mailbox,
+                    PresentMode::Immediate
+                ],
+                false
+            ),
             PresentMode::Immediate
         );
         assert_eq!(
@@ -1524,7 +1541,14 @@ mod tests {
 
         // `gl_vsync 1` always selects Fifo.
         assert_eq!(
-            select_present_mode(&[PresentMode::Immediate, PresentMode::Mailbox, PresentMode::Fifo], true),
+            select_present_mode(
+                &[
+                    PresentMode::Immediate,
+                    PresentMode::Mailbox,
+                    PresentMode::Fifo
+                ],
+                true
+            ),
             PresentMode::Fifo
         );
 
@@ -1567,6 +1591,9 @@ mod tests {
         let _mdl = MdlRenderer::new(&device, format);
         // No map uploaded: entity preparation is a no-op, not a panic.
         let draws: Vec<&crate::render::scene::BrushDraw> = Vec::new();
-        assert!(bsp.prepare_entities(&device, &queue, &draws, 0.0).is_empty());
+        assert!(
+            bsp.prepare_entities(&device, &queue, &draws, 0.0)
+                .is_empty()
+        );
     }
 }

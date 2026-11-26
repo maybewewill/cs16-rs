@@ -13,9 +13,7 @@ use glam::Mat4;
 use tracing::warn;
 use wgpu::util::DeviceExt;
 
-use crate::render::lighting::{
-    TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped,
-};
+use crate::render::lighting::{TextureFilterMode, create_sampler, upload_rgba_texture_mipmapped};
 use crate::render::scene::{
     BrushCollider, EntRenderMode, ModelRegistry, SpriteDraw, ViewBasis, glow_blend, sprite_axes,
     sprite_quad, trace_glow_occlusion,
@@ -77,7 +75,12 @@ pub fn clamp_frame(frame: f32, count: usize) -> Option<usize> {
     Some(f.clamp(0, count as i64 - 1) as usize)
 }
 
-pub fn frame_extents(origin_x: i32, origin_y: i32, width: u32, height: u32) -> (f32, f32, f32, f32) {
+pub fn frame_extents(
+    origin_x: i32,
+    origin_y: i32,
+    width: u32,
+    height: u32,
+) -> (f32, f32, f32, f32) {
     let left = origin_x as f32;
     let up = origin_y as f32;
     (left, left + width as f32, up, up - height as f32)
@@ -252,7 +255,9 @@ fn create_sprite_pipelines(
     use wgpu::CompareFunction::{Always, LessEqual};
     [
         make("sprite_opaque", None, true, LessEqual),
-        make("sprite_alpha", alpha_blend, true, LessEqual),
+        // GoldSrc `kRenderTransTexture` / `kRenderTransColor` sprites (bloodspray, blood drops,
+        // smokepuff) blend without writing depth so overlapping puffs never cut opaque squares.
+        make("sprite_alpha", alpha_blend, false, LessEqual),
         make("sprite_alpha_nodepth", alpha_blend, false, LessEqual),
         make("sprite_add", add_blend, false, LessEqual),
         make("sprite_glow", add_blend, false, Always),
@@ -384,17 +389,11 @@ impl SpriteRenderer {
     }
 
     pub fn set_texture_filter(&mut self, device: &wgpu::Device, mode: TextureFilterMode) {
-        let clamped_mode = match mode {
-            TextureFilterMode::Nearest
-            | TextureFilterMode::NearestMipmapNearest
-            | TextureFilterMode::NearestMipmapLinear => TextureFilterMode::Nearest,
-            _ => TextureFilterMode::Linear,
-        };
-        if self.filter_mode == clamped_mode {
+        if self.filter_mode == mode {
             return;
         }
-        self.filter_mode = clamped_mode;
-        self.sampler = create_sampler(device, "sprite_sampler", clamped_mode, 1, true);
+        self.filter_mode = mode;
+        self.sampler = create_sampler(device, "sprite_sampler", mode, 1, true);
         for (idx, spr) in self.sprites.iter_mut().flatten().enumerate() {
             for (fi, f) in spr.frames.iter_mut().enumerate() {
                 f.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -720,9 +719,18 @@ mod tests {
     #[test]
     fn blend_per_render_mode() {
         assert_eq!(sprite_blend_for(EntRenderMode::Normal), SpriteBlend::Opaque);
-        assert_eq!(sprite_blend_for(EntRenderMode::TransAlpha), SpriteBlend::AlphaNoDepthWrite);
-        assert_eq!(sprite_blend_for(EntRenderMode::TransColor), SpriteBlend::Alpha);
-        assert_eq!(sprite_blend_for(EntRenderMode::TransTexture), SpriteBlend::Alpha);
+        assert_eq!(
+            sprite_blend_for(EntRenderMode::TransAlpha),
+            SpriteBlend::AlphaNoDepthWrite
+        );
+        assert_eq!(
+            sprite_blend_for(EntRenderMode::TransColor),
+            SpriteBlend::Alpha
+        );
+        assert_eq!(
+            sprite_blend_for(EntRenderMode::TransTexture),
+            SpriteBlend::Alpha
+        );
         assert_eq!(sprite_blend_for(EntRenderMode::TransAdd), SpriteBlend::Add);
         assert_eq!(sprite_blend_for(EntRenderMode::Glow), SpriteBlend::Glow);
     }
@@ -769,27 +777,33 @@ mod tests {
         let Ok(gamedir) = std::env::var("CS16_GAMEDIR") else {
             return;
         };
-        let Ok(vfs) = Vfs::open(std::path::Path::new(&gamedir), cs_vfs::VfsConfig::default()) else {
+        let Ok(vfs) = Vfs::open(std::path::Path::new(&gamedir), cs_vfs::VfsConfig::default())
+        else {
             return;
         };
         if !vfs.exists("sprites/gas_puff_01.spr") {
             return;
         }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        })) else {
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            }))
+        else {
             return;
         };
-        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("sprite-batch-test"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        })) else {
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("sprite-batch-test"),
+                required_features: wgpu::Features::empty(),
+                required_limits:
+                    wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+                ..Default::default()
+            }))
+        else {
             return;
         };
 
@@ -820,13 +834,31 @@ mod tests {
             software_mode: false,
             fog: None,
         };
-        let prep = renderer.prepare(&device, &queue, &vfs, &draws, &paths, &view, &params, None, &[]);
+        let prep = renderer.prepare(
+            &device,
+            &queue,
+            &vfs,
+            &draws,
+            &paths,
+            &view,
+            &params,
+            None,
+            &[],
+        );
         assert_eq!(prep.sprite_count(), 45);
-        assert_eq!(prep.batch_count(), 1, "45 gas_puff_01.spr puffs must coalesce into 1 batch");
+        assert_eq!(
+            prep.batch_count(),
+            1,
+            "45 gas_puff_01.spr puffs must coalesce into 1 batch"
+        );
 
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("spr_test_color"),
-            size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -836,7 +868,11 @@ mod tests {
         });
         let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("spr_test_depth"),
-            size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

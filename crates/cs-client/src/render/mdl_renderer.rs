@@ -16,8 +16,8 @@ use bytemuck::{Pod, Zeroable};
 use cs_assets::gamma::{GammaTables, GoldSrcGammaConfig};
 use cs_assets::mdl::{
     BoneEvalParams, MAXSTUDIOBONES, MdlBone, MdlBoneAnim, MdlSeqEvent, STUDIO_NF_ADDITIVE,
-    STUDIO_NF_CHROME, STUDIO_NF_FLATSHADE, STUDIO_NF_MASKED, STUDIO_RLOOP, StudioModel,
-    goldsrc_angle_quat,
+    STUDIO_NF_CHROME, STUDIO_NF_FLATSHADE, STUDIO_NF_FULLBRIGHT, STUDIO_NF_MASKED,
+    STUDIO_NF_TWOSIDE, STUDIO_RLOOP, StudioModel, goldsrc_angle_quat,
 };
 use cs_vfs::Vfs;
 use glam::{Mat4, Quat, Vec3};
@@ -29,8 +29,7 @@ use crate::render::lighting::{
     upload_rgba_texture_mipmapped_with_config,
 };
 use crate::render::scene::{
-    EntRenderMode, RENDERFX_EXPLODE, RENDERFX_GLOW_SHELL, RENDERFX_LIGHT_MULTIPLIER,
-    StudioShadow,
+    EntRenderMode, RENDERFX_EXPLODE, RENDERFX_GLOW_SHELL, RENDERFX_LIGHT_MULTIPLIER, StudioShadow,
 };
 
 /// Maximum posed bones uploaded to the GPU vertex shader per studio instance (`MAXSTUDIOBONES`).
@@ -106,7 +105,11 @@ fn push_shadow_disc_vertices(shadow: &StudioShadow, verts: &mut Vec<MdlShadowVer
     if normal.length_squared() < 1e-4 || shadow.alpha <= 0.0 || shadow.radius <= 0.0 {
         return;
     }
-    let ref_up = if normal.z.abs() < 0.99 { Vec3::Z } else { Vec3::Y };
+    let ref_up = if normal.z.abs() < 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
     let u = normal.cross(ref_up).normalize_or_zero();
     let v = normal.cross(u).normalize_or_zero();
     let center = shadow.origin;
@@ -232,6 +235,8 @@ pub struct MdlPassParams {
     pub software_mode: bool,
     pub fog: Option<([f32; 3], f32)>,
     pub lights: GpuLightsUniform,
+    /// Minimum ambient floor in `[0.0, 255.0]` (`24.0` for GoldSrc first-person viewmodels).
+    pub min_ambient_light: f32,
 }
 
 impl Default for MdlPassParams {
@@ -252,6 +257,7 @@ impl Default for MdlPassParams {
             software_mode: false,
             fog: None,
             lights: GpuLightsUniform::default(),
+            min_ambient_light: 0.0,
         }
     }
 }
@@ -376,9 +382,9 @@ fn bodypart_submodel_index(
     if count == 0 {
         return None;
     }
-    let base: i64 = parts[..index]
-        .iter()
-        .try_fold(1i64, |acc, p| acc.checked_mul((p.submodels.len() as i64).max(1)))?;
+    let base: i64 = parts[..index].iter().try_fold(1i64, |acc, p| {
+        acc.checked_mul((p.submodels.len() as i64).max(1))
+    })?;
     let pick = (i64::from(body.max(0)) / base) % count;
     let idx = pick as usize;
     (idx < part.submodels.len()).then_some(idx)
@@ -497,7 +503,9 @@ fn build_cached_gpu_model(
         for sub in &bp.submodels {
             for mesh in &sub.meshes {
                 for v in &mesh.vertices {
-                    if usize::from(v.bone) >= model_bone_count {
+                    if usize::from(v.bone) >= model_bone_count
+                        || usize::from(v.norm_bone) >= model_bone_count
+                    {
                         has_oob_bone = true;
                         break 'scan;
                     }
@@ -531,8 +539,13 @@ fn build_cached_gpu_model(
                 let first_vertex = sub_verts.len() as u32;
                 sub_verts.reserve(mesh.vertices.len());
                 for v in &mesh.vertices {
-                    let bone_idx = if usize::from(v.bone) < model_bone_count {
+                    let pos_bone = if usize::from(v.bone) < model_bone_count {
                         u32::from(v.bone)
+                    } else {
+                        fallback_bone_slot.unwrap_or(0)
+                    };
+                    let norm_bone = if usize::from(v.norm_bone) < model_bone_count {
+                        u32::from(v.norm_bone)
                     } else {
                         fallback_bone_slot.unwrap_or(0)
                     };
@@ -540,8 +553,8 @@ fn build_cached_gpu_model(
                         position: v.pos.to_array(),
                         normal: v.normal.to_array(),
                         uv: v.uv,
-                        pos_bone: bone_idx,
-                        norm_bone: bone_idx,
+                        pos_bone,
+                        norm_bone,
                     });
                 }
                 meshes.push(CachedSubModelMesh {
@@ -582,6 +595,54 @@ enum MdlPipelineKind {
     XRay,
 }
 
+/// Face-culling & winding mode matching GoldSrc `gl_studio.c`:
+/// - `BackCcw`: standard world/player/left-hand viewmodels (`det >= 0`)
+/// - `BackCw`: right-hand mirrored viewmodels (`cl_righthand 1`, `det < 0`)
+/// - `TwoSided`: meshes explicitly marked `STUDIO_NF_TWOSIDE`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MdlCullMode {
+    BackCcw = 0,
+    BackCw = 1,
+    TwoSided = 2,
+}
+
+impl MdlCullMode {
+    #[inline]
+    fn slot(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    fn for_draw(mirrored: bool, tex_flags: i32) -> Self {
+        if (tex_flags & STUDIO_NF_TWOSIDE) != 0 {
+            Self::TwoSided
+        } else if mirrored {
+            Self::BackCw
+        } else {
+            Self::BackCcw
+        }
+    }
+}
+
+struct MdlPipelineSet {
+    opaque: wgpu::RenderPipeline,
+    alpha: wgpu::RenderPipeline,
+    additive: wgpu::RenderPipeline,
+    xray: wgpu::RenderPipeline,
+}
+
+impl MdlPipelineSet {
+    #[inline]
+    fn get(&self, kind: MdlPipelineKind) -> &wgpu::RenderPipeline {
+        match kind {
+            MdlPipelineKind::Opaque => &self.opaque,
+            MdlPipelineKind::Alpha => &self.alpha,
+            MdlPipelineKind::Additive => &self.additive,
+            MdlPipelineKind::XRay => &self.xray,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PreparedDraw {
     model_id: u32,
@@ -593,6 +654,7 @@ struct PreparedDraw {
     uniform_slot: u32,
     bone_byte_offset: u32,
     pipe_kind: MdlPipelineKind,
+    cull_mode: MdlCullMode,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -724,7 +786,8 @@ fn eval_sequence_pose_into(
         return;
     }
     let blend_type1 = seq.map_or(0, |s| s.blend_type[1]);
-    if blend_type1 == 0 || nb < 4 {
+    let use_2d = nb == 9 || (nb >= 4 && blend_type1 != 0);
+    if !use_2d {
         let x = (f32::from(blending[0]) / 255.0) * ((nb - 1) as f32);
         let i0 = (x.floor() as usize).min(nb - 1);
         let i1 = (i0 + 1).min(nb - 1);
@@ -735,8 +798,12 @@ fn eval_sequence_pose_into(
             out[i] = (p0.lerp(p1, t), q0.slerp(q1, t));
         }
     } else {
-        let cols = (nb as f32).sqrt().round().max(1.0) as usize;
-        let rows = nb / cols;
+        let cols = if nb == 9 {
+            3
+        } else {
+            (nb as f32).sqrt().round().max(1.0) as usize
+        };
+        let rows = (nb / cols).max(1);
         let fx = (f32::from(blending[0]) / 255.0) * (cols.saturating_sub(1) as f32);
         let fy = (f32::from(blending[1]) / 255.0) * (rows.saturating_sub(1) as f32);
         let x0 = (fx.floor() as usize).min(cols - 1);
@@ -780,24 +847,30 @@ fn eval_bones_into(
         &adj,
         &mut scratch.pose_upper,
     );
-    let prev_weight = params.prev_sequence.map(|(p_seq, p_frame, p_loop, weight)| {
-        eval_sequence_pose_into(
-            mdl,
-            p_seq,
-            p_frame,
-            p_loop,
-            params.blending,
-            &adj,
-            &mut scratch.pose_prev,
-        );
-        weight.clamp(0.0, 1.0)
-    });
+    let prev_weight = params
+        .prev_sequence
+        .map(|(p_seq, p_frame, p_loop, weight)| {
+            eval_sequence_pose_into(
+                mdl,
+                p_seq,
+                p_frame,
+                p_loop,
+                params.blending,
+                &adj,
+                &mut scratch.pose_prev,
+            );
+            weight.clamp(0.0, 1.0)
+        });
     let has_gait = if let Some((g_seq, g_frame)) = params.gait {
+        let g_loop = mdl
+            .sequences
+            .get(g_seq)
+            .is_some_and(|s| (s.flags & STUDIO_LOOPING) != 0);
         eval_sequence_pose_into(
             mdl,
             g_seq,
             g_frame,
-            true,
+            g_loop,
             [0, 0],
             &adj,
             &mut scratch.pose_gait,
@@ -853,10 +926,8 @@ fn eval_bones_merged_into(
             out[i] = p_mat;
             continue;
         }
-        let local = Mat4::from_rotation_translation(
-            goldsrc_angle_quat(bone.default_rot),
-            bone.default_pos,
-        );
+        let local =
+            Mat4::from_rotation_translation(goldsrc_angle_quat(bone.default_rot), bone.default_pos);
         out[i] = if bone.parent >= 0 && (bone.parent as usize) < i {
             out[bone.parent as usize] * local
         } else {
@@ -871,10 +942,7 @@ pub struct MdlRenderer {
     msaa_samples: u32,
     shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
-    opaque_pipeline: wgpu::RenderPipeline,
-    alpha_pipeline: wgpu::RenderPipeline,
-    additive_pipeline: wgpu::RenderPipeline,
-    xray_pipeline: wgpu::RenderPipeline,
+    pipelines: [MdlPipelineSet; 3],
     uniform_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
     bone_bgl: wgpu::BindGroupLayout,
@@ -964,18 +1032,19 @@ fn create_shadow_pipeline(
     })
 }
 
-fn create_mdl_pipelines(
+fn create_mdl_pipeline_set(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     color_format: wgpu::TextureFormat,
     sample_count: u32,
-) -> (
-    wgpu::RenderPipeline,
-    wgpu::RenderPipeline,
-    wgpu::RenderPipeline,
-    wgpu::RenderPipeline,
-) {
+    cull: MdlCullMode,
+) -> MdlPipelineSet {
+    let (front_face, cull_mode, suffix) = match cull {
+        MdlCullMode::BackCcw => (wgpu::FrontFace::Ccw, Some(wgpu::Face::Back), "ccw_back"),
+        MdlCullMode::BackCw => (wgpu::FrontFace::Cw, Some(wgpu::Face::Back), "cw_back"),
+        MdlCullMode::TwoSided => (wgpu::FrontFace::Ccw, None, "twoside"),
+    };
     let add_blend = Some(wgpu::BlendState {
         color: wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -988,8 +1057,9 @@ fn create_mdl_pipelines(
                      blend: Option<wgpu::BlendState>,
                      depth_write: bool,
                      depth_compare: wgpu::CompareFunction| {
+        let full_label = format!("{label}_{suffix}");
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
+            label: Some(&full_label),
             layout: Some(layout),
             vertex: wgpu::VertexState {
                 module: shader,
@@ -1019,8 +1089,8 @@ fn create_mdl_pipelines(
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
+                front_face,
+                cull_mode,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -1039,22 +1109,62 @@ fn create_mdl_pipelines(
         })
     };
 
-    (
-        make_pipe("mdl_opaque", None, true, wgpu::CompareFunction::LessEqual),
-        make_pipe(
+    MdlPipelineSet {
+        opaque: make_pipe("mdl_opaque", None, true, wgpu::CompareFunction::LessEqual),
+        alpha: make_pipe(
             "mdl_alpha",
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
             wgpu::CompareFunction::LessEqual,
         ),
-        make_pipe("mdl_additive", add_blend, false, wgpu::CompareFunction::LessEqual),
-        make_pipe(
+        additive: make_pipe(
+            "mdl_additive",
+            add_blend,
+            false,
+            wgpu::CompareFunction::LessEqual,
+        ),
+        xray: make_pipe(
             "mdl_xray",
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
             wgpu::CompareFunction::Greater,
         ),
-    )
+    }
+}
+
+fn create_mdl_pipelines(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> [MdlPipelineSet; 3] {
+    [
+        create_mdl_pipeline_set(
+            device,
+            shader,
+            layout,
+            color_format,
+            sample_count,
+            MdlCullMode::BackCcw,
+        ),
+        create_mdl_pipeline_set(
+            device,
+            shader,
+            layout,
+            color_format,
+            sample_count,
+            MdlCullMode::BackCw,
+        ),
+        create_mdl_pipeline_set(
+            device,
+            shader,
+            layout,
+            color_format,
+            sample_count,
+            MdlCullMode::TwoSided,
+        ),
+    ]
 }
 
 fn create_mdl_uniform_bg(
@@ -1185,8 +1295,13 @@ impl MdlRenderer {
         });
 
         let msaa_samples = 1;
-        let (opaque_pipeline, alpha_pipeline, additive_pipeline, xray_pipeline) =
-            create_mdl_pipelines(device, &shader, &pipeline_layout, color_format, msaa_samples);
+        let pipelines = create_mdl_pipelines(
+            device,
+            &shader,
+            &pipeline_layout,
+            color_format,
+            msaa_samples,
+        );
 
         let filter_mode = TextureFilterMode::LinearMipmapLinear;
         let anisotropy = 1;
@@ -1287,10 +1402,7 @@ impl MdlRenderer {
             msaa_samples,
             shader,
             pipeline_layout,
-            opaque_pipeline,
-            alpha_pipeline,
-            additive_pipeline,
-            xray_pipeline,
+            pipelines,
             uniform_bgl,
             tex_bgl,
             bone_bgl,
@@ -1339,17 +1451,13 @@ impl MdlRenderer {
             return;
         }
         self.msaa_samples = samples;
-        let (opaque, alpha, additive, xray) = create_mdl_pipelines(
+        self.pipelines = create_mdl_pipelines(
             device,
             &self.shader,
             &self.pipeline_layout,
             self.color_format,
             samples,
         );
-        self.opaque_pipeline = opaque;
-        self.alpha_pipeline = alpha;
-        self.additive_pipeline = additive;
-        self.xray_pipeline = xray;
         self.shadow_pipeline = create_shadow_pipeline(
             device,
             &self.shadow_shader,
@@ -1581,7 +1689,7 @@ impl MdlRenderer {
             let eval_params = BoneEvalParams {
                 sequence: seq_idx,
                 frame,
-                loop_anim: false,
+                loop_anim: looping,
                 blending: inst.blending,
                 controller: inst.controllers,
                 mouth: inst.mouth,
@@ -1601,6 +1709,7 @@ impl MdlRenderer {
                 Vec3::ONE
             };
             let base_xf = inst.transform * Mat4::from_scale(explode_scale);
+            let mirrored = inst.flip_winding || base_xf.determinant() < 0.0;
             let light_mul = if inst.renderfx == RENDERFX_LIGHT_MULTIPLIER {
                 1.5
             } else {
@@ -1611,6 +1720,7 @@ impl MdlRenderer {
                 inst.light_rgb * light_mul,
                 &params.lights,
                 params.direct,
+                params.min_ambient_light,
             );
 
             let mut push_posed_model = |m_id: u32,
@@ -1618,7 +1728,8 @@ impl MdlRenderer {
                                         bone_byte_offset: u32,
                                         shell_only: bool| {
                 for bi in 0..cached_m.mdl.bodyparts.len() {
-                    let Some(sub_idx) = bodypart_submodel_index(&cached_m.mdl.bodyparts, bi, inst.body)
+                    let Some(sub_idx) =
+                        bodypart_submodel_index(&cached_m.mdl.bodyparts, bi, inst.body)
                     else {
                         continue;
                     };
@@ -1637,11 +1748,8 @@ impl MdlRenderer {
                             .mdl
                             .resolve_skin_texture(inst.skin, mesh.skinref)
                             .min(cached_m.textures.len().saturating_sub(1));
-                        let tex_flags = cached_m
-                            .textures
-                            .get(tex_idx)
-                            .map(|t| t.flags)
-                            .unwrap_or(0);
+                        let tex_flags =
+                            cached_m.textures.get(tex_idx).map(|t| t.flags).unwrap_or(0);
                         let alpha_test = (tex_flags & STUDIO_NF_MASKED) != 0;
 
                         let (shader_mode, shell_offset, pipe_kind, alpha_val) = if shell_only {
@@ -1706,6 +1814,7 @@ impl MdlRenderer {
                                 (tex_flags
                                     & (STUDIO_NF_FLATSHADE
                                         | STUDIO_NF_CHROME
+                                        | STUDIO_NF_FULLBRIGHT
                                         | STUDIO_NF_ADDITIVE
                                         | STUDIO_NF_MASKED)) as f32,
                                 shell_offset,
@@ -1724,6 +1833,7 @@ impl MdlRenderer {
                         let raw = bytemuck::bytes_of(&u);
                         self.scratch_uniform_bytes[start..start + raw.len()].copy_from_slice(raw);
 
+                        let cull_mode = MdlCullMode::for_draw(mirrored, tex_flags);
                         self.prepared_draws.push(PreparedDraw {
                             model_id: m_id,
                             bodypart_idx: bi as u16,
@@ -1734,19 +1844,19 @@ impl MdlRenderer {
                             uniform_slot,
                             bone_byte_offset,
                             pipe_kind,
+                            cull_mode,
                         });
                         uniform_slot += 1;
 
-                        if !shell_only
-                            && let Some(xray_rgb) = inst.xray_color
-                        {
+                        if !shell_only && let Some(xray_rgb) = inst.xray_color {
                             let xray_u = MdlUniforms {
                                 render_color: [xray_rgb[0], xray_rgb[1], xray_rgb[2], 0.65],
                                 flags_params: [6.0, 0.0, 0.0, 1.0],
                                 ..u
                             };
                             let x_start = self.scratch_uniform_bytes.len();
-                            self.scratch_uniform_bytes.resize(x_start + uniform_stride, 0);
+                            self.scratch_uniform_bytes
+                                .resize(x_start + uniform_stride, 0);
                             let x_raw = bytemuck::bytes_of(&xray_u);
                             self.scratch_uniform_bytes[x_start..x_start + x_raw.len()]
                                 .copy_from_slice(x_raw);
@@ -1761,6 +1871,7 @@ impl MdlRenderer {
                                 uniform_slot,
                                 bone_byte_offset,
                                 pipe_kind: MdlPipelineKind::XRay,
+                                cull_mode,
                             });
                             uniform_slot += 1;
                             xray_draws += 1;
@@ -1879,7 +1990,12 @@ impl MdlRenderer {
             0,
             bytemuck::bytes_of(&ShadowUniforms {
                 view_proj: params.view_proj.to_cols_array_2d(),
-                camera_pos: [params.camera_pos.x, params.camera_pos.y, params.camera_pos.z, 1.0],
+                camera_pos: [
+                    params.camera_pos.x,
+                    params.camera_pos.y,
+                    params.camera_pos.z,
+                    1.0,
+                ],
                 fog_color_density: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_density],
                 gamma_params: [
                     params.gamma,
@@ -1960,11 +2076,9 @@ impl MdlRenderer {
         pass: &mut wgpu::RenderPass<'a>,
         prepared: &PreparedMdlPass,
     ) -> usize {
-        self.draw_filtered(
-            pass,
-            prepared,
-            |k| matches!(k, MdlPipelineKind::Alpha | MdlPipelineKind::Additive),
-        )
+        self.draw_filtered(pass, prepared, |k| {
+            matches!(k, MdlPipelineKind::Alpha | MdlPipelineKind::Additive)
+        })
     }
 
     /// Draw wall-occluded X-Ray player silhouettes (`CompareFunction::Greater`, no depth write).
@@ -1993,7 +2107,7 @@ impl MdlRenderer {
             return 0;
         }
         let mut draw_calls = 0usize;
-        let mut last_pipe: Option<MdlPipelineKind> = None;
+        let mut last_pipe: Option<(MdlPipelineKind, MdlCullMode)> = None;
         let mut last_vbuf: Option<(u32, u16, u16)> = None;
         let mut last_bone_offset: Option<u32> = None;
         let mut last_tex: Option<(u32, u16)> = None;
@@ -2019,15 +2133,11 @@ impl MdlRenderer {
                 continue;
             };
 
-            if last_pipe != Some(d.pipe_kind) {
-                let pipe = match d.pipe_kind {
-                    MdlPipelineKind::Opaque => &self.opaque_pipeline,
-                    MdlPipelineKind::Alpha => &self.alpha_pipeline,
-                    MdlPipelineKind::Additive => &self.additive_pipeline,
-                    MdlPipelineKind::XRay => &self.xray_pipeline,
-                };
+            let pipe_key = (d.pipe_kind, d.cull_mode);
+            if last_pipe != Some(pipe_key) {
+                let pipe = self.pipelines[d.cull_mode.slot()].get(d.pipe_kind);
                 pass.set_pipeline(pipe);
-                last_pipe = Some(d.pipe_kind);
+                last_pipe = Some(pipe_key);
             }
             let vbuf_key = (d.model_id, d.bodypart_idx, d.submodel_idx);
             if last_vbuf != Some(vbuf_key) {
@@ -2076,12 +2186,14 @@ fn stage_bone_palette(
     offset as u32
 }
 
-/// Port of `R_EntityDynamicLight` (`ref/common/ref_light.c:520-685`, read 2026-11-24).
+/// Port of `R_EntityDynamicLight` (`ref/common/ref_light.c:520-685`, read 2026-11-24) with
+/// GoldSrc minimum ambient floor (`min_ambient_light`, `24.0` for viewmodels).
 fn compute_entity_lighting(
     ent_origin: Vec3,
     floor_light_rgb: Vec3,
     lights: &GpuLightsUniform,
     direct: f32,
+    min_ambient_light: f32,
 ) -> (f32, f32, Vec3, Vec3) {
     let light = floor_light_rgb * 255.0;
     let mut final_light = light;
@@ -2113,9 +2225,11 @@ fn compute_entity_lighting(
     let scale = direct.clamp(0.75, 1.0);
     light_dir *= scale;
     let mut shadelight = light_dir.length();
-    let ambientlight = (total - shadelight).min(128.0);
+    let ambientlight = (total - shadelight)
+        .max(min_ambient_light.clamp(0.0, 128.0))
+        .min(128.0);
     if ambientlight + shadelight > 255.0 {
-        shadelight = 255.0 - ambientlight;
+        shadelight = (255.0 - ambientlight).max(0.0);
     }
     let col_max = final_light.max_element();
     let lightcolor = if col_max > 0.0 {
@@ -2138,7 +2252,6 @@ fn r_studio_lighting_cpu_ref(
     shadelight: f32,
     plightvec: Vec3,
 ) -> f32 {
-    const STUDIO_NF_FULLBRIGHT: i32 = 0x0040;
     const SHADE_LAMBERT: f32 = 1.4953241;
     if (tex_flags & STUDIO_NF_FULLBRIGHT) != 0 {
         return 1.0;
@@ -2256,7 +2369,7 @@ mod tests {
 
         const TEX_FLAG_FLATSHADE: u32 = 1;
         const TEX_FLAG_CHROME: u32 = 2;
-        const TEX_FLAG_FULLBRIGHT: u32 = 64;
+        const TEX_FLAG_FULLBRIGHT: u32 = 4;
         const SHADE_LAMBERT: f32 = 1.4953241;
 
         let lv = if (tex_flags & TEX_FLAG_FULLBRIGHT) != 0 {
@@ -2318,13 +2431,30 @@ mod tests {
 
     #[test]
     fn viewmodel_transform_with_angles_applies_roll_and_righthand_mirror() {
-        let xf_r = viewmodel_transform_with_angles(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, 90.0, Vec3::ZERO, true);
+        let xf_r = viewmodel_transform_with_angles(
+            Vec3::new(1.0, 2.0, 3.0),
+            0.0,
+            0.0,
+            90.0,
+            Vec3::ZERO,
+            true,
+        );
         let up_col = xf_r.z_axis.truncate();
-        assert!((up_col - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-4, "got {up_col:?}");
+        assert!(
+            (up_col - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-4,
+            "got {up_col:?}"
+        );
         assert!((xf_r.y_axis.truncate().length() - 1.0).abs() < 1e-4);
         assert!(xf_r.determinant() < 0.0);
 
-        let xf_l = viewmodel_transform_with_angles(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, 90.0, Vec3::ZERO, false);
+        let xf_l = viewmodel_transform_with_angles(
+            Vec3::new(1.0, 2.0, 3.0),
+            0.0,
+            0.0,
+            90.0,
+            Vec3::ZERO,
+            false,
+        );
         assert!(xf_l.determinant() > 0.0);
     }
 
@@ -2350,7 +2480,8 @@ mod tests {
 
     #[test]
     fn uniform_buffers_fit_webgl2_limit_and_light_gamma_lut_is_bit_exact() {
-        let webgl2_limit = wgpu::Limits::downlevel_webgl2_defaults().max_uniform_buffer_binding_size as usize;
+        let webgl2_limit =
+            wgpu::Limits::downlevel_webgl2_defaults().max_uniform_buffer_binding_size as usize;
         assert_eq!(std::mem::size_of::<MdlBonesUniform>(), 6144);
         assert_eq!(std::mem::size_of::<LightGammaUniform>(), 2048);
         assert!(std::mem::size_of::<MdlUniforms>() <= webgl2_limit);
@@ -2449,6 +2580,7 @@ mod tests {
                                 pos: Vec3::new(3.5, -1.25, 7.0),
                                 normal: Vec3::new(0.4, -0.5, 0.7681146).normalize(),
                                 bone: 1,
+                                norm_bone: 1,
                                 uv: [0.25, 0.75],
                             }],
                         },
@@ -2459,6 +2591,7 @@ mod tests {
                                 pos: Vec3::new(-2.0, 5.0, 1.0),
                                 normal: Vec3::new(-0.6, 0.2, 0.7745967).normalize(),
                                 bone: 0,
+                                norm_bone: 0,
                                 uv: [0.5, 0.5],
                             }],
                         },
@@ -2469,6 +2602,7 @@ mod tests {
                                 pos: Vec3::new(0.5, 0.5, -2.0),
                                 normal: Vec3::Y,
                                 bone: 1,
+                                norm_bone: 1,
                                 uv: [0.1, 0.9],
                             }],
                         },
@@ -2510,8 +2644,13 @@ mod tests {
                 Vec3::new(1.0, 0.0, -0.5),
                 right_handed,
             );
-            let (amb, shade, lcol, pvec) =
-                compute_entity_lighting(xf.w_axis.truncate(), Vec3::new(0.6, 0.7, 0.8), &lights, 0.9);
+            let (amb, shade, lcol, pvec) = compute_entity_lighting(
+                xf.w_axis.truncate(),
+                Vec3::new(0.6, 0.7, 0.8),
+                &lights,
+                0.9,
+                0.0,
+            );
             let mut bone_bytes = vec![0u8; mdl.bones.len() * BONE_MATRIX_BYTES];
             for (b, &bm) in ref_bones.iter().enumerate() {
                 write_bone_3x4(&mut bone_bytes[b * BONE_MATRIX_BYTES..], xf * bm);
@@ -2522,7 +2661,8 @@ mod tests {
                     let m = xf * ref_bones[usize::from(v.bone)];
                     let cpu_pos = m.transform_point3(v.pos);
                     let cpu_norm = m.transform_vector3(v.normal).normalize_or_zero();
-                    let cpu_lv = r_studio_lighting_cpu_ref(&tables, flags, cpu_norm, amb, shade, pvec);
+                    let cpu_lv =
+                        r_studio_lighting_cpu_ref(&tables, flags, cpu_norm, amb, shade, pvec);
                     let cpu_col = lcol * cpu_lv;
                     let cpu_uv = if (flags & STUDIO_NF_CHROME) != 0 {
                         [
@@ -2533,8 +2673,11 @@ mod tests {
                         v.uv
                     };
                     let masked_flags = (flags
-                        & (STUDIO_NF_FLATSHADE | STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE | STUDIO_NF_MASKED))
-                        as u32;
+                        & (STUDIO_NF_FLATSHADE
+                            | STUDIO_NF_CHROME
+                            | STUDIO_NF_FULLBRIGHT
+                            | STUDIO_NF_ADDITIVE
+                            | STUDIO_NF_MASKED)) as u32;
                     let (gpu_pos, gpu_norm, gpu_uv, gpu_col) = wgsl_skin_and_shade(
                         &bone_bytes,
                         &lut,
@@ -2552,7 +2695,10 @@ mod tests {
                     );
                     assert!((gpu_pos - cpu_pos).length() < 1e-4, "pos mismatch");
                     assert!((gpu_norm - cpu_norm).length() < 1e-4, "norm mismatch");
-                    assert!((gpu_uv[0] - cpu_uv[0]).abs() < 1e-5 && (gpu_uv[1] - cpu_uv[1]).abs() < 1e-5);
+                    assert!(
+                        (gpu_uv[0] - cpu_uv[0]).abs() < 1e-5
+                            && (gpu_uv[1] - cpu_uv[1]).abs() < 1e-5
+                    );
                     assert!(
                         (gpu_col - cpu_col).abs().max_element() < (1.0 / 255.0),
                         "color diff {:?} vs {:?}",
@@ -2570,7 +2716,8 @@ mod tests {
         let Ok(gamedir) = std::env::var("CS16_GAMEDIR") else {
             return;
         };
-        let Ok(vfs) = Vfs::open(std::path::Path::new(&gamedir), cs_vfs::VfsConfig::default()) else {
+        let Ok(vfs) = Vfs::open(std::path::Path::new(&gamedir), cs_vfs::VfsConfig::default())
+        else {
             return;
         };
         let Ok(urban) = StudioModel::load(&vfs, "models/player/urban/urban.mdl") else {
@@ -2615,7 +2762,8 @@ mod tests {
         let verify_model = |label: &str,
                             mdl: &StudioModel,
                             eval_params: &BoneEvalParams,
-                            xf: Mat4| -> (usize, usize) {
+                            xf: Mat4|
+         -> (usize, usize) {
             let ref_bones = mdl.evaluate_bones_full(eval_params);
             let mask = compute_upper_body_mask(mdl);
             let mut scratch = BoneEvalScratch::new();
@@ -2633,7 +2781,7 @@ mod tests {
                 write_bone_3x4(&mut bone_bytes[b * BONE_MATRIX_BYTES..], xf * bm);
             }
             let (amb, shade, lcol, pvec) =
-                compute_entity_lighting(xf.w_axis.truncate(), Vec3::splat(0.75), &lights, 0.9);
+                compute_entity_lighting(xf.w_axis.truncate(), Vec3::splat(0.75), &lights, 0.9, 0.0);
 
             let mut verts_checked = 0usize;
             let mut chrome_verts = 0usize;
@@ -2647,14 +2795,21 @@ mod tests {
                         .min(mdl.textures.len().saturating_sub(1));
                     let flags = mdl.textures.get(tex_idx).map(|t| t.flags).unwrap_or(0);
                     let masked_flags = (flags
-                        & (STUDIO_NF_FLATSHADE | STUDIO_NF_CHROME | STUDIO_NF_ADDITIVE | STUDIO_NF_MASKED))
-                        as u32;
+                        & (STUDIO_NF_FLATSHADE
+                            | STUDIO_NF_CHROME
+                            | STUDIO_NF_FULLBRIGHT
+                            | STUDIO_NF_ADDITIVE
+                            | STUDIO_NF_MASKED)) as u32;
                     for v in &mesh.vertices {
-                        let bm = ref_bones.get(usize::from(v.bone)).copied().unwrap_or(Mat4::IDENTITY);
+                        let bm = ref_bones
+                            .get(usize::from(v.bone))
+                            .copied()
+                            .unwrap_or(Mat4::IDENTITY);
                         let m = xf * bm;
                         let cpu_pos = m.transform_point3(v.pos);
                         let cpu_norm = m.transform_vector3(v.normal).normalize_or_zero();
-                        let cpu_lv = r_studio_lighting_cpu_ref(&tables, flags, cpu_norm, amb, shade, pvec);
+                        let cpu_lv =
+                            r_studio_lighting_cpu_ref(&tables, flags, cpu_norm, amb, shade, pvec);
                         let cpu_col = lcol * cpu_lv;
                         let cpu_uv = if (flags & STUDIO_NF_CHROME) != 0 {
                             chrome_verts += 1;
@@ -2714,9 +2869,15 @@ mod tests {
             "urban.mdl",
             &urban,
             &urban_params,
-            Mat4::from_rotation_translation(Quat::from_rotation_z(0.6), Vec3::new(90.0, 0.0, -32.0)),
+            Mat4::from_rotation_translation(
+                Quat::from_rotation_z(0.6),
+                Vec3::new(90.0, 0.0, -32.0),
+            ),
         );
-        assert!(urban_verts > 500, "urban.mdl should have >500 verts, got {urban_verts}");
+        assert!(
+            urban_verts > 500,
+            "urban.mdl should have >500 verts, got {urban_verts}"
+        );
 
         for right_handed in [false, true] {
             let vm_xf = viewmodel_transform_with_angles(
@@ -2728,16 +2889,29 @@ mod tests {
                 right_handed,
             );
             let (ak_verts, ak_chrome) = verify_model(
-                if right_handed { "v_ak47.mdl (righthand 1)" } else { "v_ak47.mdl (righthand 0)" },
+                if right_handed {
+                    "v_ak47.mdl (righthand 1)"
+                } else {
+                    "v_ak47.mdl (righthand 0)"
+                },
                 &ak47,
                 &ak_params,
                 vm_xf,
             );
-            assert!(ak_verts > 500, "v_ak47.mdl should have >500 verts, got {ak_verts}");
+            assert!(
+                ak_verts > 500,
+                "v_ak47.mdl should have >500 verts, got {ak_verts}"
+            );
             // v_ak47.mdl has chrome metallic parts if textures carry STUDIO_NF_CHROME; check non-negative.
-            let has_chrome_tex = ak47.textures.iter().any(|t| (t.flags & STUDIO_NF_CHROME) != 0);
+            let has_chrome_tex = ak47
+                .textures
+                .iter()
+                .any(|t| (t.flags & STUDIO_NF_CHROME) != 0);
             if has_chrome_tex {
-                assert!(ak_chrome > 0, "v_ak47.mdl chrome vertices must be exercised");
+                assert!(
+                    ak_chrome > 0,
+                    "v_ak47.mdl chrome vertices must be exercised"
+                );
             }
         }
 
@@ -2756,22 +2930,26 @@ mod tests {
         // 2. End-to-end headless GPU render check for urban.mdl (normal + X-Ray) and v_ak47.mdl (righthand 1)
         // under WebGL2 downlevel uniform limits!
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let Some(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .ok() else {
+        let Some(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            }))
+            .ok()
+        else {
             return;
         };
         let limits = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
-        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("mdl-parity-webgl2-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            ..Default::default()
-        })) else {
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("mdl-parity-webgl2-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                ..Default::default()
+            }))
+        else {
             return;
         };
 
@@ -2780,7 +2958,11 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let color_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mdl_parity_color"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -2790,7 +2972,11 @@ mod tests {
         });
         let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mdl_parity_depth"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -2825,7 +3011,9 @@ mod tests {
             ),
             sequence: 4,
             gait: Some((1, 2.0)),
-            attached_model: vfs.exists("models/p_ak47.mdl").then_some("models/p_ak47.mdl"),
+            attached_model: vfs
+                .exists("models/p_ak47.mdl")
+                .then_some("models/p_ak47.mdl"),
             xray_color: Some([0.25, 0.55, 1.0]),
             ..StudioInstance::default()
         };
@@ -2836,9 +3024,17 @@ mod tests {
             flip_winding: false,
             ..StudioInstance::default()
         };
-        let prep = mdl_r.prepare_studio(&device, &queue, &vfs, &[urban_inst, ak_inst], &pass_params);
-        assert!(prep.total_draws() >= 2, "expected studio draws, got {}", prep.total_draws());
-        assert!(prep.xray_draw_count() > 0, "expected spec_xray draws for urban.mdl");
+        let prep =
+            mdl_r.prepare_studio(&device, &queue, &vfs, &[urban_inst, ak_inst], &pass_params);
+        assert!(
+            prep.total_draws() >= 2,
+            "expected studio draws, got {}",
+            prep.total_draws()
+        );
+        assert!(
+            prep.xray_draw_count() > 0,
+            "expected spec_xray draws for urban.mdl"
+        );
 
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mdl_parity_enc"),
@@ -2871,7 +3067,8 @@ mod tests {
             assert_eq!(xray_calls, prep.xray_draw_count());
         }
 
-        let bpr = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bpr = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mdl_parity_readback"),
             size: u64::from(bpr) * u64::from(h),
@@ -2893,7 +3090,11 @@ mod tests {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(Some(enc.finish()));
 
@@ -2916,6 +3117,129 @@ mod tests {
         }
         drop(mapped);
         staging.unmap();
-        assert!(lit_pixels > 200, "GPU-skinned urban.mdl + v_ak47.mdl rendered too few pixels: {lit_pixels}");
+        assert!(
+            lit_pixels > 200,
+            "GPU-skinned urban.mdl + v_ak47.mdl rendered too few pixels: {lit_pixels}"
+        );
+    }
+
+    #[test]
+    fn cull_mode_mirror_winding_and_normal_lighting_parity() {
+        assert_eq!(MdlCullMode::for_draw(false, 0), MdlCullMode::BackCcw);
+        assert_eq!(MdlCullMode::for_draw(true, 0), MdlCullMode::BackCw);
+        assert_eq!(
+            MdlCullMode::for_draw(false, STUDIO_NF_TWOSIDE),
+            MdlCullMode::TwoSided
+        );
+        assert_eq!(
+            MdlCullMode::for_draw(true, STUDIO_NF_TWOSIDE),
+            MdlCullMode::TwoSided
+        );
+
+        let xf_left = viewmodel_transform_with_angles(Vec3::ZERO, 0.0, 0.0, 0.0, Vec3::ZERO, false);
+        let xf_right = viewmodel_transform_with_angles(Vec3::ZERO, 0.0, 0.0, 0.0, Vec3::ZERO, true);
+        assert!(
+            xf_left.determinant() > 0.5,
+            "cl_righthand 0 must have positive det"
+        );
+        assert!(
+            xf_right.determinant() < -0.5,
+            "cl_righthand 1 must have negative det (mirror)"
+        );
+
+        // CCW front-facing triangle with outward normal +Z in model space.
+        let (v0, v1, v2) = (
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let n_model = (v1 - v0).cross(v2 - v0).normalize();
+        for (xf, expect_cw) in [(xf_left, false), (xf_right, true)] {
+            let p0 = xf.transform_point3(v0);
+            let p1 = xf.transform_point3(v1);
+            let p2 = xf.transform_point3(v2);
+            let geo_ccw_normal = (p1 - p0).cross(p2 - p0).normalize();
+            let skinned_normal = xf.transform_vector3(n_model).normalize();
+            let dot = geo_ccw_normal.dot(skinned_normal);
+            if expect_cw {
+                assert!(
+                    dot < -0.999,
+                    "mirrored viewmodel flips triangle winding to CW while keeping outward normal: dot={dot}"
+                );
+            } else {
+                assert!(
+                    dot > 0.999,
+                    "non-mirrored viewmodel preserves CCW winding aligned with outward normal: dot={dot}"
+                );
+            }
+        }
+
+        // Diffuse lighting parity for symmetric vertical light vector under cl_righthand 0 vs 1.
+        let tables = GammaTables::build(GoldSrcGammaConfig::default());
+        let lights = GpuLightsUniform::default();
+        let (amb, shade, _, pvec) =
+            compute_entity_lighting(Vec3::ZERO, Vec3::splat(0.5), &lights, 0.9, 24.0);
+        let n_sample = Vec3::new(0.3, 0.4, 0.8660254).normalize();
+        let n_left = xf_left.transform_vector3(n_sample).normalize();
+        let n_right = xf_right.transform_vector3(n_sample).normalize();
+        let lv_left = r_studio_lighting_cpu_ref(&tables, 0, n_left, amb, shade, pvec);
+        let lv_right = r_studio_lighting_cpu_ref(&tables, 0, n_right, amb, shade, pvec);
+        assert!(
+            (lv_left - lv_right).abs() < 1e-4,
+            "mirror lighting mismatch: left={lv_left} right={lv_right}"
+        );
+    }
+
+    #[test]
+    fn viewmodel_ambient_floor_and_muzzleflash_dlight() {
+        let tables = GammaTables::build(GoldSrcGammaConfig::default());
+        let lights = GpuLightsUniform::default();
+        let (amb_dark, shade_dark, _, pvec_dark) =
+            compute_entity_lighting(Vec3::ZERO, Vec3::ZERO, &lights, 0.9, 24.0);
+        let (amb_bright, shade_bright, _, pvec_bright) =
+            compute_entity_lighting(Vec3::ZERO, Vec3::splat(0.85), &lights, 0.9, 24.0);
+        assert!(
+            amb_dark >= 24.0,
+            "dark room viewmodel must honor 24.0 ambient floor: {amb_dark}"
+        );
+        let total_dark = amb_dark + shade_dark;
+        let total_bright = amb_bright + shade_bright;
+        assert!(
+            total_bright > total_dark * 5.0,
+            "bright room total light must be dramatically brighter than dark room ({total_bright} vs {total_dark})"
+        );
+        let lit_dark =
+            r_studio_lighting_cpu_ref(&tables, 0, Vec3::Z, amb_dark, shade_dark, pvec_dark);
+        let lit_bright =
+            r_studio_lighting_cpu_ref(&tables, 0, Vec3::Z, amb_bright, shade_bright, pvec_bright);
+        assert!(
+            lit_dark > 0.05 && lit_dark < 0.45 && lit_bright > lit_dark * 2.0,
+            "viewmodel must stay legible in dark rooms without being neon-flat (dark={lit_dark}, bright={lit_bright})"
+        );
+
+        let mut flash_lights = GpuLightsUniform::default();
+        flash_lights.counts[0] = 1;
+        flash_lights.dlight_pos_rad[0] = [26.0, 0.0, 0.0, 180.0];
+        flash_lights.dlight_col[0] = [1.0, 0.76, 0.37, 1.0];
+        let (amb_flash, shade_flash, _, _) =
+            compute_entity_lighting(Vec3::ZERO, Vec3::ZERO, &flash_lights, 0.9, 24.0);
+        assert!(
+            amb_flash + shade_flash > total_dark + 80.0 && shade_flash > 80.0,
+            "muzzleflash dlight must illuminate dark viewmodel (amb={amb_flash}, shade={shade_flash})"
+        );
+    }
+
+    #[test]
+    fn studio_frame_respects_looping_vs_non_looping_clamp() {
+        let loop_f = studio_frame(0.0, 0.0, 1.0, 60.0, 10.25, 37, true);
+        assert!(
+            (0.0..36.0).contains(&loop_f),
+            "looping sequence must wrap cleanly inside [0, span): {loop_f}"
+        );
+        let death_f = studio_frame(0.0, 0.0, 1.0, 30.0, 10.0, 25, false);
+        assert!(
+            (death_f - 23.999).abs() < 0.01,
+            "non-looping death sequence must clamp at final frame: {death_f}"
+        );
     }
 }
