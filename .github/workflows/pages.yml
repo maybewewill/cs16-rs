@@ -1,0 +1,80 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+          targets: wasm32-unknown-unknown
+
+      - name: Resolve locked wasm-bindgen version
+        shell: bash
+        run: |
+          WBG_VER=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/"/, "", $3); print $3; exit}' Cargo.lock)
+          echo "Resolved locked wasm-bindgen version: ${WBG_VER}"
+          echo "WBG_VER=${WBG_VER}" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-pages-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pages-cargo-
+
+      - name: Cache wasm-bindgen-cli
+        id: cache-wbg
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: ${{ runner.os }}-wasm-bindgen-cli-${{ env.WBG_VER }}
+
+      - name: Install matching wasm-bindgen-cli
+        if: steps.cache-wbg.outputs.cache-hit != 'true'
+        run: cargo install --locked wasm-bindgen-cli --version "${{ env.WBG_VER }}"
+
+      - name: Build Web PWA bundle
+        run: |
+          cargo xtask web-build --release
+          touch dist/web/.nojekyll
+          ls -la dist/web dist/web/pkg dist/web/icons
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

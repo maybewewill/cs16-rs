@@ -10,7 +10,7 @@ const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n   
                      cargo xtask golden <ip:port> <name>\n       \
                      cargo xtask visual-diff [--map de_dust2] [--brightness <f32>] [--out target/visual-diff] [--reference-dir <dir>] [--resolution 1280x720] [--port 27099] [--ui none] [--build]\n       \
                      cargo xtask bench [--suite all|server|delta|client|gpu] [--gpu] [--ticks <n>] [--players <1..=32>] [--map <name>] [--gamedir <path>] [--stub] [--json]\n       \
-                     cargo xtask web-build [--out <dir>]\n       \
+                     cargo xtask web-build [--out <dir>] [--release]\n       \
                      cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]\n       \
                      cargo xtask mod build [dir] [--out <dir>]\n       \
                      cargo xtask mod replay <dump.json> [--mod-path <override>] [--json]\n       \
@@ -98,9 +98,11 @@ fn main() -> ExitCode {
 /// Stages `web/`, builds `cs-web` for `wasm32-unknown-unknown`, and emits JS bindings with `wasm-bindgen`.
 fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
     let mut out_dir = PathBuf::from(DEFAULT_WEB_OUT);
+    let mut release = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out_dir = args.next().ok_or("--out needs a value")?.into(),
+            "--release" => release = true,
             other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
         }
     }
@@ -142,15 +144,22 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
     }
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = std::process::Command::new(cargo)
-        .args(["build", "--target", "wasm32-unknown-unknown", "-p", "cs-web"])
+    let mut build_cmd = std::process::Command::new(cargo);
+    build_cmd.args(["build", "--target", "wasm32-unknown-unknown", "-p", "cs-web"]);
+    if release {
+        build_cmd.arg("--release");
+    }
+    let status = build_cmd
         .status()
         .map_err(|e| format!("cannot run cargo: {e}"))?;
     if !status.success() {
         return Ok(ExitCode::FAILURE);
     }
 
-    let wasm_path = Path::new("target/wasm32-unknown-unknown/debug/cs-web.wasm");
+    let profile_dir = if release { "release" } else { "debug" };
+    let wasm_path = PathBuf::from("target/wasm32-unknown-unknown")
+        .join(profile_dir)
+        .join("cs-web.wasm");
     if !wasm_path.exists() {
         return Err(format!("expected built wasm binary missing: {}", wasm_path.display()));
     }
@@ -162,7 +171,7 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
         .arg(&pkg_dir)
         .arg("--out-name")
         .arg("cs_web")
-        .arg(wasm_path)
+        .arg(&wasm_path)
         .status();
 
     match bindgen {
@@ -173,7 +182,7 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
         Ok(st) => Err(format!("wasm-bindgen exited with {st}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let raw_dst = pkg_dir.join("cs_web_raw.wasm");
-            std::fs::copy(wasm_path, &raw_dst).map_err(|err| io_error(&raw_dst, &err))?;
+            std::fs::copy(&wasm_path, &raw_dst).map_err(|err| io_error(&raw_dst, &err))?;
             println!(
                 "Staged {} and raw {}; install wasm-bindgen-cli (`cargo install wasm-bindgen-cli`) and re-run `cargo xtask web-build` to emit pkg/cs_web.js",
                 out_dir.display(),
