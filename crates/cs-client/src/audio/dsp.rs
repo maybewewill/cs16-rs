@@ -31,35 +31,35 @@ const fn preset(row: [f32; 9]) -> RoomPreset {
 
 /// Retail GoldSrc `sx_presets` 29x9 table (`hw.dll:0x1031c6c0..0x1031cad4`, `room_type 0..=28`).
 pub const ROOM_PRESETS: [RoomPreset; NUM_ROOM_TYPES] = [
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0]),         // 0
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.065, 0.1, 0.0, 0.01]),      // 1
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.02, 0.75, 0.0, 0.01]),      // 2
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.03, 0.78, 0.0, 0.02]),      // 3
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.06, 0.77, 0.0, 0.03]),      // 4
-    preset([0.0, 0.0, 0.05, 0.85, 1.0, 0.008, 0.96, 2.0, 0.01]),   // 5
-    preset([0.0, 0.0, 0.05, 0.88, 1.0, 0.01, 0.98, 2.0, 0.02]),    // 6
-    preset([0.0, 0.0, 0.05, 0.92, 1.0, 0.015, 0.995, 2.0, 0.04]),  // 7
-    preset([0.0, 0.0, 0.05, 0.84, 1.0, 0.0, 0.0, 2.0, 0.012]),     // 8
-    preset([0.0, 0.0, 0.05, 0.9, 1.0, 0.0, 0.0, 2.0, 0.008]),      // 9
-    preset([0.0, 0.0, 0.05, 0.95, 1.0, 0.0, 0.0, 2.0, 0.004]),     // 10
-    preset([0.0, 0.0, 0.05, 0.7, 0.0, 0.0, 0.0, 2.0, 0.012]),      // 11
-    preset([0.0, 0.0, 0.055, 0.78, 0.0, 0.0, 0.0, 2.0, 0.008]),    // 12
-    preset([0.0, 0.0, 0.05, 0.86, 0.0, 0.0, 0.0, 2.0, 0.002]),     // 13
-    preset([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.01]),        // 14
-    preset([1.0, 0.0, 0.0, 0.0, 1.0, 0.06, 0.85, 2.0, 0.02]),      // 15
-    preset([1.0, 0.0, 0.0, 0.0, 1.0, 0.2, 0.6, 2.0, 0.05]),        // 16
-    preset([0.0, 0.0, 0.05, 0.8, 1.0, 0.0, 0.48, 2.0, 0.016]),     // 17
-    preset([0.0, 0.0, 0.06, 0.9, 1.0, 0.0, 0.52, 2.0, 0.01]),      // 18
-    preset([0.0, 0.0, 0.07, 0.94, 1.0, 0.3, 0.6, 2.0, 0.008]),     // 19
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.3, 0.42, 2.0, 0.0]),        // 20
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.35, 0.48, 2.0, 0.0]),       // 21
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.38, 0.6, 2.0, 0.0]),        // 22
-    preset([0.0, 0.0, 0.05, 0.9, 1.0, 0.2, 0.28, 0.0, 0.0]),       // 23
-    preset([0.0, 0.0, 0.07, 0.9, 1.0, 0.3, 0.4, 0.0, 0.0]),        // 24
-    preset([0.0, 0.0, 0.09, 0.9, 1.0, 0.35, 0.5, 0.0, 0.0]),       // 25
-    preset([0.0, 1.0, 0.01, 0.9, 0.0, 0.0, 0.0, 2.0, 0.05]),       // 26
-    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.009, 0.999, 2.0, 0.04]),    // 27
-    preset([0.0, 0.0, 0.001, 0.999, 0.0, 0.2, 0.8, 2.0, 0.05]),    // 28
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0]), // 0
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.065, 0.1, 0.0, 0.01]), // 1
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.02, 0.75, 0.0, 0.01]), // 2
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.03, 0.78, 0.0, 0.02]), // 3
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.06, 0.77, 0.0, 0.03]), // 4
+    preset([0.0, 0.0, 0.05, 0.85, 1.0, 0.008, 0.96, 2.0, 0.01]), // 5
+    preset([0.0, 0.0, 0.05, 0.88, 1.0, 0.01, 0.98, 2.0, 0.02]), // 6
+    preset([0.0, 0.0, 0.05, 0.92, 1.0, 0.015, 0.995, 2.0, 0.04]), // 7
+    preset([0.0, 0.0, 0.05, 0.84, 1.0, 0.0, 0.0, 2.0, 0.012]), // 8
+    preset([0.0, 0.0, 0.05, 0.9, 1.0, 0.0, 0.0, 2.0, 0.008]), // 9
+    preset([0.0, 0.0, 0.05, 0.95, 1.0, 0.0, 0.0, 2.0, 0.004]), // 10
+    preset([0.0, 0.0, 0.05, 0.7, 0.0, 0.0, 0.0, 2.0, 0.012]), // 11
+    preset([0.0, 0.0, 0.055, 0.78, 0.0, 0.0, 0.0, 2.0, 0.008]), // 12
+    preset([0.0, 0.0, 0.05, 0.86, 0.0, 0.0, 0.0, 2.0, 0.002]), // 13
+    preset([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.01]), // 14
+    preset([1.0, 0.0, 0.0, 0.0, 1.0, 0.06, 0.85, 2.0, 0.02]), // 15
+    preset([1.0, 0.0, 0.0, 0.0, 1.0, 0.2, 0.6, 2.0, 0.05]), // 16
+    preset([0.0, 0.0, 0.05, 0.8, 1.0, 0.0, 0.48, 2.0, 0.016]), // 17
+    preset([0.0, 0.0, 0.06, 0.9, 1.0, 0.0, 0.52, 2.0, 0.01]), // 18
+    preset([0.0, 0.0, 0.07, 0.94, 1.0, 0.3, 0.6, 2.0, 0.008]), // 19
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.3, 0.42, 2.0, 0.0]), // 20
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.35, 0.48, 2.0, 0.0]), // 21
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.38, 0.6, 2.0, 0.0]), // 22
+    preset([0.0, 0.0, 0.05, 0.9, 1.0, 0.2, 0.28, 0.0, 0.0]), // 23
+    preset([0.0, 0.0, 0.07, 0.9, 1.0, 0.3, 0.4, 0.0, 0.0]), // 24
+    preset([0.0, 0.0, 0.09, 0.9, 1.0, 0.35, 0.5, 0.0, 0.0]), // 25
+    preset([0.0, 1.0, 0.01, 0.9, 0.0, 0.0, 0.0, 2.0, 0.05]), // 26
+    preset([0.0, 0.0, 0.0, 0.0, 1.0, 0.009, 0.999, 2.0, 0.04]), // 27
+    preset([0.0, 0.0, 0.001, 0.999, 0.0, 0.2, 0.8, 2.0, 0.05]), // 28
 ];
 
 #[derive(Debug, Clone)]
@@ -186,6 +186,13 @@ impl RoomDsp {
 
     pub fn set_room_off(&mut self, off: bool) {
         self.room_off = off;
+        if off {
+            self.wet_ramp = 0.0;
+        }
+    }
+
+    pub fn room_off(&self) -> bool {
+        self.room_off
     }
 
     pub fn set_underwater(&mut self, underwater: bool) {
@@ -195,8 +202,12 @@ impl RoomDsp {
     pub fn process_frame(&mut self, left: f32, right: f32) -> (f32, f32) {
         let active_room = if self.room_off { 0 } else { self.room_type };
         let preset = ROOM_PRESETS[active_room];
-        let target_wet = if active_room == 0 { 0.0 } else { 1.0 };
-        self.wet_ramp += (target_wet - self.wet_ramp) * 0.01;
+        if self.room_off {
+            self.wet_ramp = 0.0;
+        } else {
+            let target_wet = if active_room == 0 { 0.0 } else { 1.0 };
+            self.wet_ramp += (target_wet - self.wet_ramp) * 0.01;
+        }
 
         let (mut l, mut r) = (left, right);
         if self.wet_ramp > 1e-4 {
@@ -308,7 +319,10 @@ mod tests {
                     tail_energy += l.abs() + r.abs();
                 }
             }
-            assert!(tail_energy > 0.01, "room_type {rt} should produce reverb/echo tail");
+            assert!(
+                tail_energy > 0.01,
+                "room_type {rt} should produce reverb/echo tail"
+            );
         }
 
         // Underwater filter attenuates 4 kHz tone much more strongly than 200 Hz tone.
@@ -327,6 +341,45 @@ mod tests {
         };
         let low = measure(200.0);
         let high = measure(4000.0);
-        assert!(low > high * 20.0, "low={low} must vastly exceed high={high}");
+        assert!(
+            low > high * 20.0,
+            "low={low} must vastly exceed high={high}"
+        );
+    }
+
+    #[test]
+    fn default_room_type_zero_is_bit_exact_dry_and_room_off_bypasses_immediately() {
+        let mut dsp = RoomDsp::new(44_100);
+        assert_eq!(dsp.room_type(), 0);
+        assert!(!dsp.room_off());
+
+        // Impulse followed by silence on default room_type = 0 must be 100% dry passthrough.
+        let (l0, r0) = dsp.process_frame(0.75, -0.5);
+        assert_eq!((l0, r0), (0.75, -0.5));
+        for _ in 0..4_000 {
+            let (l, r) = dsp.process_frame(0.0, 0.0);
+            assert_eq!(
+                (l, r),
+                (0.0, 0.0),
+                "room_type 0 must never produce wet tail"
+            );
+        }
+
+        // Turning room_off on after a heavy reverb preset immediately kills the wet tail.
+        dsp.set_room_type(24);
+        for i in 0..1_000 {
+            let inp = if i < 100 { 0.8 } else { 0.0 };
+            let _ = dsp.process_frame(inp, inp);
+        }
+        dsp.set_room_off(true);
+        assert!(dsp.room_off());
+        for _ in 0..256 {
+            let (l, r) = dsp.process_frame(0.25, -0.25);
+            assert_eq!(
+                (l, r),
+                (0.25, -0.25),
+                "room_off=1 must bypass wet reverb immediately"
+            );
+        }
     }
 }

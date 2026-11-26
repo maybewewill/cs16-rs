@@ -159,7 +159,6 @@ struct ChannelSlot {
     attenuation: f32,
     pitch: u8,
     sample_name: String,
-    rate_jitter: f64,
     wav: Option<Arc<DecodedWav>>,
     phase: f64,
     left_gain: f32,
@@ -184,7 +183,6 @@ impl Default for ChannelSlot {
             attenuation: 0.8,
             pitch: PITCH_NORM,
             sample_name: String::new(),
-            rate_jitter: 1.0,
             wav: None,
             phase: 0.0,
             left_gain: 0.0,
@@ -217,11 +215,11 @@ pub struct GoldSrcMixer {
     listener: ListenerState,
     master_volume: f32,
     suit_volume: f32,
+    snd_occlusion: bool,
     occlusion_factor: f32,
     lerping: bool,
     hisound: bool,
     timescale: f32,
-    rng_state: u64,
     next_age: u64,
     fade_sample_acc: usize,
 }
@@ -245,18 +243,30 @@ impl GoldSrcMixer {
             listener: ListenerState::default(),
             master_volume: 0.8,
             suit_volume: 0.25,
+            snd_occlusion: false,
             occlusion_factor: 0.0,
             lerping: true,
             hisound: true,
             timescale: 1.0,
-            rng_state: 0x9E37_79B9_7F4A_7C15,
             next_age: 1,
             fade_sample_acc: 0,
         }
     }
 
+    pub fn snd_occlusion(&self) -> bool {
+        self.snd_occlusion
+    }
+
+    pub fn set_snd_occlusion(&mut self, enabled: bool) {
+        self.snd_occlusion = enabled;
+    }
+
     pub fn occlusion_factor(&self) -> f32 {
         self.occlusion_factor
+    }
+
+    pub fn room_off(&self) -> bool {
+        self.dsp.room_off()
     }
 
     pub fn set_resampling(&mut self, lerping: bool, hisound: bool) {
@@ -362,21 +372,30 @@ impl GoldSrcMixer {
         };
     }
 
+    /// Retail GoldSrc plays the exact `pitch` requested by `S_StartDynamicSound` /
+    /// `PM_PlayStepSound` with zero random duplicate-shot pitch drift (`1.0`).
     pub fn channel_rate_jitter(&self, entity: u16, channel: u8) -> Option<f64> {
         self.dynamic
             .iter()
             .chain(self.static_ch.iter())
             .find(|c| c.active && c.entity == entity && c.channel == channel)
-            .map(|c| c.rate_jitter)
+            .map(|_| 1.0)
     }
 
-    fn next_duplicate_jitter(&mut self) -> f64 {
-        self.rng_state = self
-            .rng_state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let pct_tenths = ((self.rng_state >> 32) % 1000) as f64;
-        1.0 + pct_tenths / 10_000.0
+    pub fn channel_pitch(&self, entity: u16, channel: u8) -> Option<u8> {
+        self.dynamic
+            .iter()
+            .chain(self.static_ch.iter())
+            .find(|c| c.active && c.entity == entity && c.channel == channel)
+            .map(|c| c.pitch)
+    }
+
+    pub fn is_channel_occluded(&self, entity: u16, channel: u8) -> Option<bool> {
+        self.dynamic
+            .iter()
+            .chain(self.static_ch.iter())
+            .find(|c| c.active && c.entity == entity && c.channel == channel)
+            .map(|c| c.occluded)
     }
 
     pub fn room_type(&self) -> usize {
@@ -433,16 +452,22 @@ impl GoldSrcMixer {
             if !ch.active {
                 continue;
             }
-            if !ch.is_2d && ch.entity > 0 && let Some(&pos) = entity_positions.get(&ch.entity) {
+            if !ch.is_2d
+                && self.listener.local_entity != Some(ch.entity)
+                && ch.entity > 0
+                && let Some(&pos) = entity_positions.get(&ch.entity)
+            {
                 ch.origin = pos;
             }
             let (l, r, occ, alive) = Self::spatialize(
                 &self.listener,
+                ch.entity,
                 ch.origin,
                 ch.master_vol,
                 ch.attenuation,
                 ch.is_2d,
                 ch.is_static && ch.wav.as_ref().is_some_and(|w| w.loop_start.is_some()),
+                self.snd_occlusion,
                 self.occlusion_factor,
                 occlusion_fn,
             );
@@ -472,6 +497,7 @@ impl GoldSrcMixer {
                 continue;
             }
             if !ch.is_2d
+                && self.listener.local_entity != Some(ch.entity)
                 && ch.entity > 0
                 && let Ok(idx) = sorted_positions.binary_search_by_key(&ch.entity, |&(id, _)| id)
             {
@@ -479,11 +505,13 @@ impl GoldSrcMixer {
             }
             let (l, r, occ, alive) = Self::spatialize(
                 &self.listener,
+                ch.entity,
                 ch.origin,
                 ch.master_vol,
                 ch.attenuation,
                 ch.is_2d,
                 ch.is_static && ch.wav.as_ref().is_some_and(|w| w.loop_start.is_some()),
+                self.snd_occlusion,
                 self.occlusion_factor,
                 None,
             );
@@ -501,17 +529,27 @@ impl GoldSrcMixer {
     #[allow(clippy::too_many_arguments)]
     fn spatialize(
         listener: &ListenerState,
+        entity: u16,
         origin: Vec3,
         vol: f32,
         attenuation: f32,
         is_2d: bool,
         keep_when_far: bool,
+        snd_occlusion: bool,
         occ_factor: f32,
         occlusion_fn: Option<&dyn Fn(Vec3) -> bool>,
     ) -> (f32, f32, bool, bool) {
-        if is_2d || attenuation <= 0.0 {
-            let v = vol.clamp(0.0, 2.0);
-            return (v, v, false, true);
+        let clamped_vol = if vol.is_finite() {
+            vol.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if is_2d
+            || listener.local_entity == Some(entity)
+            || attenuation <= 0.0
+            || !origin.is_finite()
+        {
+            return (clamped_vol, clamped_vol, false, true);
         }
         let delta = origin - listener.origin;
         let dist = delta.length();
@@ -519,20 +557,26 @@ impl GoldSrcMixer {
             return (0.0, 0.0, false, false);
         }
         let dist_mult = attenuation / SOUND_NOMINAL_CLIP_DIST;
-        let scale = (1.0 - dist * dist_mult).max(0.0);
+        let scale = (1.0 - dist * dist_mult).clamp(0.0, 1.0);
         if scale <= 0.0 {
             return (0.0, 0.0, false, keep_when_far);
         }
-        let dir = if dist > 1e-3 { delta / dist } else { Vec3::ZERO };
-        let rdot = listener.right.dot(dir).clamp(-1.0, 1.0);
-        // Exact full stereo separation when orthogonal on X-axis (`|rdot| == 1` -> opposite side 0).
-        let right_pan = (1.0 + rdot) * scale;
-        let left_pan = (1.0 - rdot) * scale;
-        // Retail `hw.dll:FUN_101fd050` (`SND_Spatialize`): no 48-unit wall occlusion multiplier.
-        let _ = (occ_factor, occlusion_fn);
-        let left = (left_pan * vol).clamp(0.0, 2.0);
-        let right = (right_pan * vol).clamp(0.0, 2.0);
-        (left, right, false, true)
+        let dir = if dist > 1e-4 {
+            delta / dist
+        } else {
+            Vec3::ZERO
+        };
+        let right = listener.right.normalize_or_zero();
+        let dot = right.dot(dir).clamp(-1.0, 1.0);
+        // Xash3D FWGS `engine/client/sound/s_main.c` `S_SpatializeChannel`:
+        // `rvol = bound(0, master_vol * (1 - dist * dist_mult) * (1 + dot), 255)`
+        // `lvol = bound(0, master_vol * (1 - dist * dist_mult) * (1 - dot), 255)`
+        let right_gain = (clamped_vol * scale * (1.0 + dot)).clamp(0.0, 1.0);
+        let left_gain = (clamped_vol * scale * (1.0 - dot)).clamp(0.0, 1.0);
+        // Retail GoldSrc (`hw.dll`) has ZERO wall occlusion LPF; only apply optional LPF when
+        // `snd_occlusion` is explicitly enabled alongside a positive `s_occfactor`.
+        let occluded = snd_occlusion && occ_factor > 0.0 && occlusion_fn.is_some_and(|f| f(origin));
+        (left_gain, right_gain, occluded, true)
     }
 
     pub fn handle_sound_command(
@@ -579,18 +623,20 @@ impl GoldSrcMixer {
                 .find(|c| c.active && c.entity == s.entity && c.channel == s.channel)
             {
                 if (s.flags & SND_FL_CHANGE_VOL) != 0 {
-                    ch.master_vol = s.volume.clamp(0.0, 2.0);
+                    ch.master_vol = s.volume.clamp(0.0, 1.0);
                 }
                 if (s.flags & SND_FL_CHANGE_PITCH) != 0 {
-                    ch.pitch = s.pitch.max(2);
+                    ch.pitch = normalize_pitch(s.pitch);
                 }
                 let (l, r, occ, _) = Self::spatialize(
                     &self.listener,
+                    ch.entity,
                     ch.origin,
                     ch.master_vol,
                     ch.attenuation,
                     ch.is_2d,
                     is_static,
+                    self.snd_occlusion,
                     self.occlusion_factor,
                     occlusion_fn,
                 );
@@ -640,18 +686,20 @@ impl GoldSrcMixer {
                 .find(|c| c.active && c.entity == s.entity && c.channel == s.channel)
             {
                 if (s.flags & SND_FL_CHANGE_VOL) != 0 {
-                    ch.master_vol = s.volume.clamp(0.0, 2.0);
+                    ch.master_vol = s.volume.clamp(0.0, 1.0);
                 }
                 if (s.flags & SND_FL_CHANGE_PITCH) != 0 {
-                    ch.pitch = s.pitch.max(2);
+                    ch.pitch = normalize_pitch(s.pitch);
                 }
                 let (l, r, occ, _) = Self::spatialize(
                     &self.listener,
+                    ch.entity,
                     ch.origin,
                     ch.master_vol,
                     ch.attenuation,
                     ch.is_2d,
                     is_static,
+                    self.snd_occlusion,
                     self.occlusion_factor,
                     None,
                 );
@@ -686,16 +734,21 @@ impl GoldSrcMixer {
         is_static: bool,
         occlusion_fn: Option<&dyn Fn(Vec3) -> bool>,
     ) {
-        let is_2d = self.listener.local_entity == Some(s.entity)
-            || s.attenuation <= 0.0
-            || !s.origin.is_finite();
+        let is_2d = s.attenuation <= 0.0 || !s.origin.is_finite();
+        let master_vol = if s.volume.is_finite() {
+            s.volume.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let (l, r, occ, alive) = Self::spatialize(
             &self.listener,
+            s.entity,
             s.origin,
-            s.volume.clamp(0.0, 2.0),
+            master_vol,
             s.attenuation,
             is_2d,
             is_static && wav.loop_start.is_some(),
+            self.snd_occlusion,
             self.occlusion_factor,
             occlusion_fn,
         );
@@ -704,25 +757,13 @@ impl GoldSrcMixer {
         }
         let age = self.next_age;
         self.next_age = self.next_age.wrapping_add(1);
-        let idx = self.pick_slot(is_static, s.entity, s.channel);
         let raw_name = s.name.as_deref().unwrap_or("");
         let sample_name = if raw_name.is_empty() {
             String::new()
         } else {
             normalize_sound_path(raw_name)
         };
-        let rate_jitter = if !is_static
-            && !sample_name.is_empty()
-            && self
-                .dynamic
-                .iter()
-                .enumerate()
-                .any(|(i, c)| i != idx && c.active && c.sample_name == sample_name)
-        {
-            self.next_duplicate_jitter()
-        } else {
-            1.0
-        };
+        let idx = self.pick_slot(is_static, s.entity, s.channel, s.origin, &sample_name);
         let slot = if is_static {
             &mut self.static_ch[idx]
         } else {
@@ -735,11 +776,10 @@ impl GoldSrcMixer {
             is_static,
             is_2d,
             origin: s.origin,
-            master_vol: s.volume.clamp(0.0, 2.0),
+            master_vol,
             attenuation: s.attenuation,
-            pitch: s.pitch.max(2),
+            pitch: normalize_pitch(s.pitch),
             sample_name,
-            rate_jitter,
             wav: Some(wav),
             phase: 0.0,
             left_gain: l,
@@ -809,16 +849,16 @@ impl GoldSrcMixer {
         let Some(first) = queue.pop_front() else {
             return;
         };
-        let is_2d = self.listener.local_entity == Some(s.entity)
-            || s.attenuation <= 0.0
-            || !s.origin.is_finite();
+        let is_2d = s.attenuation <= 0.0 || !s.origin.is_finite();
         let (l, r, occ, alive) = Self::spatialize(
             &self.listener,
+            s.entity,
             s.origin,
             first.volume,
             s.attenuation,
             is_2d,
             false,
+            self.snd_occlusion,
             self.occlusion_factor,
             occlusion_fn,
         );
@@ -827,7 +867,7 @@ impl GoldSrcMixer {
         }
         let age = self.next_age;
         self.next_age = self.next_age.wrapping_add(1);
-        let idx = self.pick_slot(is_static, s.entity, s.channel);
+        let idx = self.pick_slot(is_static, s.entity, s.channel, s.origin, "");
         let slot = if is_static {
             &mut self.static_ch[idx]
         } else {
@@ -844,7 +884,6 @@ impl GoldSrcMixer {
             attenuation: s.attenuation,
             pitch: first.pitch,
             sample_name: String::new(),
-            rate_jitter: 1.0,
             wav: first.wav,
             phase: 0.0,
             left_gain: l,
@@ -857,13 +896,46 @@ impl GoldSrcMixer {
         };
     }
 
-    fn pick_slot(&self, is_static: bool, entity: u16, channel: u8) -> usize {
+    fn pick_slot(
+        &self,
+        is_static: bool,
+        entity: u16,
+        channel: u8,
+        origin: Vec3,
+        sample_name: &str,
+    ) -> usize {
         let pool = if is_static {
             &self.static_ch
         } else {
             &self.dynamic
         };
-        if channel != chan::AUTO
+        if is_static {
+            // `SND_PickStaticChannel` (`Xash3D FWGS s_main.c`): static sounds only replace an
+            // identical `(entity, origin, sample)` slot so world ambient sounds layer cleanly.
+            if !sample_name.is_empty()
+                && let Some(pos) = pool.iter().position(|c| {
+                    c.active
+                        && c.entity == entity
+                        && c.origin == origin
+                        && c.sample_name == sample_name
+                })
+            {
+                return pos;
+            }
+        } else if channel == chan::ITEM {
+            // Layer distinct `CHAN_ITEM` reload/keyframe sounds (`clipout`, `clipin`, `boltpull`)
+            // without cutting each other off; re-triggering the same sample replaces cleanly.
+            if !sample_name.is_empty()
+                && let Some(pos) = pool.iter().position(|c| {
+                    c.active
+                        && c.entity == entity
+                        && c.channel == chan::ITEM
+                        && c.sample_name == sample_name
+                })
+            {
+                return pos;
+            }
+        } else if channel != chan::AUTO
             && let Some(pos) = pool
                 .iter()
                 .position(|c| c.active && c.entity == entity && c.channel == channel)
@@ -877,9 +949,19 @@ impl GoldSrcMixer {
         let mut best_idx = 0usize;
         let mut best_score = f32::INFINITY;
         for (i, ch) in pool.iter().enumerate() {
-            let protected = local_ent == Some(ch.entity)
-                && matches!(ch.channel, chan::WEAPON | chan::VOICE | chan::STREAM);
-            let prio = if protected { 100.0 } else { 0.0 };
+            let protected_stream = ch.channel == chan::STREAM;
+            let protected_local = local_ent == Some(ch.entity)
+                && matches!(
+                    ch.channel,
+                    chan::WEAPON | chan::VOICE | chan::STREAM | chan::BODY | chan::ITEM
+                );
+            let prio = if protected_stream {
+                200.0
+            } else if protected_local {
+                100.0
+            } else {
+                0.0
+            };
             let score = prio + ch.left_gain + ch.right_gain;
             if score < best_score
                 || ((score - best_score).abs() < 1e-6 && ch.age < pool[best_idx].age)
@@ -976,7 +1058,12 @@ fn soft_clip(x: f32) -> f32 {
 /// Resampling honors `s_lerping` (`S_MixChannelToBuffer` / `S_MixAudio` in Xash3D FWGS
 /// `engine/client/sound/s_mix.c`, read 2026-11-25) and `hisound` (`11025 Hz` step quantization
 /// when `hisound 0`).
-fn sample_channel(ch: &mut ChannelSlot, timescale: f32, lerping: bool, hisound: bool) -> (f32, f32) {
+fn sample_channel(
+    ch: &mut ChannelSlot,
+    timescale: f32,
+    lerping: bool,
+    hisound: bool,
+) -> (f32, f32) {
     let Some(wav) = ch.wav.as_ref() else {
         advance_vox_or_stop(ch);
         return (0.0, 0.0);
@@ -1034,18 +1121,16 @@ fn sample_channel(ch: &mut ChannelSlot, timescale: f32, lerping: bool, hisound: 
         r = ch.occ_lp[1];
     }
 
-    let pitch_ratio = f64::from(ch.pitch.max(2)) / f64::from(PITCH_NORM);
-    // Retail `hw.dll:FUN_10202bf0`: `(timescale + 1.0) * 0.5` pitch scaling + duplicate jitter.
+    let pitch_ratio = f64::from(normalize_pitch(ch.pitch)) / f64::from(PITCH_NORM);
+    // Retail `hw.dll:FUN_10202bf0`: `(timescale + 1.0) * 0.5` pitch scaling (exact `1.0` at normal
+    // timescale, zero random duplicate pitch drift).
     let timescale_pitch = (f64::from(timescale) + 1.0) * 0.5;
     let effective_src_rate = if hisound {
         f64::from(wav.sample_rate)
     } else {
         f64::from(wav.sample_rate.min(11025))
     };
-    let step = (effective_src_rate / f64::from(MIX_SAMPLE_RATE))
-        * pitch_ratio
-        * timescale_pitch
-        * ch.rate_jitter;
+    let step = (effective_src_rate / f64::from(MIX_SAMPLE_RATE)) * pitch_ratio * timescale_pitch;
     ch.phase += step;
 
     if let (Some(ls), Some(le)) = (wav.loop_start, wav.loop_end)
@@ -1091,6 +1176,39 @@ fn advance_vox_or_stop(ch: &mut ChannelSlot) -> bool {
     false
 }
 
+/// Exact GoldSrc / Xash3D FWGS `SND_Spatialize` (`engine/client/sound/s_main.c`):
+/// - `entity == local_entity || attenuation <= 0.0` returns pure centered `(v, v)` with zero pan
+///   and zero distance falloff.
+/// - 3D sources use `SOUND_NOMINAL_CLIP_DIST = 1000.0`, `dist_mult = attenuation / 1000.0`, linear
+///   distance falloff `(1.0 - dist * dist_mult).clamp(0.0, 1.0)`, and GoldSrc stereo dot-product
+///   panning (`rscale = 1.0 + dot`, `lscale = 1.0 - dot`) bounded to `[0.0, 1.0]`.
+pub fn snd_spatialize(
+    listener: &ListenerState,
+    entity: u16,
+    origin: Vec3,
+    master_vol: f32,
+    attenuation: f32,
+) -> (f32, f32) {
+    let (l, r, _, _) = GoldSrcMixer::spatialize(
+        listener,
+        entity,
+        origin,
+        master_vol,
+        attenuation,
+        false,
+        true,
+        false,
+        0.0,
+        None,
+    );
+    (l, r)
+}
+
+#[inline]
+fn normalize_pitch(pitch: u8) -> u8 {
+    if pitch <= 1 { PITCH_NORM } else { pitch }
+}
+
 pub fn normalize_sound_path(rel: &str) -> String {
     let lower = rel.trim().replace('\\', "/").to_ascii_lowercase();
     let trimmed = lower.trim_start_matches(['/', '*']);
@@ -1098,5 +1216,338 @@ pub fn normalize_sound_path(rel: &str) -> String {
         trimmed.to_string()
     } else {
         format!("sound/{trimmed}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::wav::encode_test_wav_pcm16;
+
+    fn sine_wav(sample_rate: u32, freq_hz: f32, frames: usize, amp: f32) -> Vec<u8> {
+        let pcm: Vec<i16> = (0..frames)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                let s = (2.0 * std::f32::consts::PI * freq_hz * t).sin() * amp;
+                (s.clamp(-1.0, 1.0) * 32_767.0).round() as i16
+            })
+            .collect();
+        encode_test_wav_pcm16(sample_rate, 1, &pcm, None, None)
+    }
+
+    #[test]
+    fn defaults_are_unmuffled_and_dry_waveform() {
+        let wav = sine_wav(22_050, 4_000.0, 2_205, 0.6);
+
+        let mut mixer_wall = GoldSrcMixer::new();
+        let mut mixer_open = GoldSrcMixer::new();
+        assert!(
+            !mixer_wall.snd_occlusion(),
+            "snd_occlusion must default to false (0)"
+        );
+        assert_eq!(mixer_wall.occlusion_factor(), 0.0);
+        assert_eq!(
+            mixer_wall.room_type(),
+            0,
+            "room_type must default to 0 (dry)"
+        );
+        assert!(!mixer_wall.room_off());
+
+        let listener = ListenerState {
+            origin: Vec3::ZERO,
+            right: Vec3::Y,
+            local_entity: Some(1),
+            waterlevel: 0,
+        };
+        for m in [&mut mixer_wall, &mut mixer_open] {
+            m.set_volumes(1.0, 0.25);
+            m.insert_cached_wav("weapons/ak47-1.wav", &wav);
+            m.update_listener_and_entities(listener, &HashMap::new(), None);
+        }
+
+        let shot = SoundStart::by_name(
+            "weapons/ak47-1.wav",
+            7,
+            chan::WEAPON,
+            Vec3::new(300.0, 0.0, 0.0),
+            0.8,
+            0.8,
+            PITCH_NORM,
+        );
+        // Even when world trace reports a wall in between, default retail GoldSrc applies ZERO LPF.
+        mixer_wall.start_sound(None, &shot, false, Some(&|_| true));
+        mixer_open.start_sound(None, &shot, false, Some(&|_| false));
+        assert_eq!(mixer_wall.is_channel_occluded(7, chan::WEAPON), Some(false));
+
+        // Mix past the 100 ms sample to also prove room_type = 0 leaves zero reverb tail.
+        let mut out_wall = vec![0.0f32; (MIX_SAMPLE_RATE as usize / 5) * 2];
+        let mut out_open = vec![0.0f32; (MIX_SAMPLE_RATE as usize / 5) * 2];
+        mixer_wall.mix_frames(&mut out_wall);
+        mixer_open.mix_frames(&mut out_open);
+
+        let max_diff = out_wall
+            .iter()
+            .zip(out_open.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert_eq!(
+            max_diff, 0.0,
+            "default snd_occlusion=0 must render bit-exact unmuffled PCM through walls"
+        );
+        let tail_start = (MIX_SAMPLE_RATE as usize * 3 / 20) * 2;
+        let tail_peak = out_open[tail_start..]
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0f32, f32::max);
+        assert_eq!(
+            tail_peak, 0.0,
+            "default room_type=0 must be 100% dry with zero tail"
+        );
+    }
+
+    #[test]
+    fn snd_spatialize_local_centered_and_remote_linear_1000u_pan() {
+        let listener = ListenerState {
+            origin: Vec3::new(100.0, 200.0, 64.0),
+            right: Vec3::new(0.0, -1.0, 0.0), // GoldSrc yaw=0 facing +X -> right is -Y
+            local_entity: Some(1),
+            waterlevel: 0,
+        };
+
+        // 1. Local entity: exact centered `left == right == vol` regardless of offset or angle.
+        for origin in [
+            Vec3::new(900.0, -900.0, 500.0),
+            Vec3::new(-5000.0, 4000.0, -200.0),
+            Vec3::new(100.0, 150.0, 64.0),
+        ] {
+            let (l, r) = snd_spatialize(&listener, 1, origin, 0.75, 0.8);
+            assert_eq!(
+                (l, r),
+                (0.75, 0.75),
+                "local entity must be centered at {origin:?}"
+            );
+        }
+
+        // 2. Non-attenuated (`attenuation <= 0.0`) remote entity: pure centered 2D.
+        let (l2d, r2d) = snd_spatialize(&listener, 5, Vec3::new(100.0, -500.0, 64.0), 0.6, 0.0);
+        assert_eq!((l2d, r2d), (0.6, 0.6));
+
+        // 3. Remote entity straight ahead (`dot == 0.0`): exact linear `1000.0` nominal clip dist.
+        for (dist, attn, expected) in [
+            (0.0f32, 1.0f32, 1.0f32),
+            (250.0, 1.0, 0.75),
+            (500.0, 1.0, 0.50),
+            (1000.0, 1.0, 0.0),
+            (1200.0, 1.0, 0.0),
+            (500.0, 0.8, 0.60),
+        ] {
+            let pos = listener.origin + Vec3::new(dist, 0.0, 0.0);
+            let (l, r) = snd_spatialize(&listener, 2, pos, 1.0, attn);
+            assert!(
+                (l - expected).abs() < 1e-5 && (r - expected).abs() < 1e-5,
+                "dist={dist} attn={attn}: got ({l}, {r}), expected {expected}"
+            );
+        }
+
+        // 4. Remote entity directly to listener's right (-Y) vs left (+Y) at 500u, attn=1.0, vol=0.5.
+        let right_pos = listener.origin + Vec3::new(0.0, -500.0, 0.0);
+        let (lr, rr) = snd_spatialize(&listener, 3, right_pos, 0.5, 1.0);
+        assert!(
+            (lr - 0.0).abs() < 1e-5 && (rr - 0.5).abs() < 1e-5,
+            "right ear: ({lr}, {rr})"
+        );
+
+        let left_pos = listener.origin + Vec3::new(0.0, 500.0, 0.0);
+        let (ll, rl) = snd_spatialize(&listener, 4, left_pos, 0.5, 1.0);
+        assert!(
+            (ll - 0.5).abs() < 1e-5 && (rl - 0.0).abs() < 1e-5,
+            "left ear: ({ll}, {rl})"
+        );
+
+        // Close panned source at vol=1.0 must clamp cleanly to 1.0 (matches Xash3D `bound(0, v, 255)`).
+        let near_right = listener.origin + Vec3::new(0.0, -100.0, 0.0);
+        let (ln, rn) = snd_spatialize(&listener, 6, near_right, 1.0, 0.8);
+        assert_eq!(ln, 0.0);
+        assert_eq!(rn, 1.0);
+    }
+
+    #[test]
+    fn zero_pitch_drift_across_20_consecutive_pitch_norm_shots() {
+        let wav = sine_wav(22_050, 660.0, 2_205, 0.5);
+        let mut mixer = GoldSrcMixer::new();
+        mixer.set_volumes(1.0, 0.25);
+        mixer.insert_cached_wav("weapons/ak47-1.wav", &wav);
+
+        // Fire 20 overlapping dynamic shots on CHAN_AUTO: every single slot must keep exact 1.0x pitch.
+        for i in 0..20u16 {
+            let s = SoundStart::by_name(
+                "weapons/ak47-1.wav",
+                10 + i,
+                chan::AUTO,
+                Vec3::ZERO,
+                0.8,
+                0.0,
+                PITCH_NORM,
+            );
+            mixer.start_sound(None, &s, false, None);
+            assert_eq!(mixer.channel_rate_jitter(10 + i, chan::AUTO), Some(1.0));
+            assert_eq!(mixer.channel_pitch(10 + i, chan::AUTO), Some(PITCH_NORM));
+        }
+        assert_eq!(mixer.active_channel_counts().0, 20);
+
+        // Compare rendered waveform of shot #1 vs shot #20 played consecutively: bit-exact match.
+        mixer.stop_all();
+        let mut first_pcm = vec![0.0f32; 1024 * 2];
+        let mut last_pcm = vec![0.0f32; 1024 * 2];
+        for i in 0..20 {
+            let s = SoundStart::by_name(
+                "weapons/ak47-1.wav",
+                1,
+                chan::WEAPON,
+                Vec3::ZERO,
+                0.8,
+                0.0,
+                PITCH_NORM,
+            );
+            mixer.start_sound(None, &s, false, None);
+            let mut tmp = vec![0.0f32; 1024 * 2];
+            mixer.mix_frames(&mut tmp);
+            if i == 0 {
+                first_pcm = tmp;
+            } else if i == 19 {
+                last_pcm = tmp;
+            }
+        }
+        assert_eq!(
+            first_pcm, last_pcm,
+            "20 consecutive PITCH_NORM shots must have zero pitch drift"
+        );
+    }
+
+    #[test]
+    fn goldsrc_channel_replacement_and_reload_layering() {
+        let wav = sine_wav(22_050, 440.0, 11_025, 0.5);
+        let mut mixer = GoldSrcMixer::new();
+        mixer.set_volumes(1.0, 0.25);
+        for name in [
+            "weapons/ak47-1.wav",
+            "weapons/ak47-2.wav",
+            "weapons/ak47_clipout.wav",
+            "weapons/ak47_clipin.wav",
+            "weapons/ak47_boltpull.wav",
+            "ambience/wind1.wav",
+            "ambience/wind2.wav",
+        ] {
+            mixer.insert_cached_wav(name, &wav);
+        }
+
+        // Firing on (ent=1, CHAN_WEAPON) replaces previous (ent=1, CHAN_WEAPON).
+        mixer.start_sound(
+            None,
+            &SoundStart::by_name(
+                "weapons/ak47-1.wav",
+                1,
+                chan::WEAPON,
+                Vec3::ZERO,
+                0.9,
+                0.0,
+                100,
+            ),
+            false,
+            None,
+        );
+        mixer.start_sound(
+            None,
+            &SoundStart::by_name(
+                "weapons/ak47-2.wav",
+                1,
+                chan::WEAPON,
+                Vec3::ZERO,
+                0.7,
+                0.0,
+                100,
+            ),
+            false,
+            None,
+        );
+        assert_eq!(mixer.active_channel_counts(), (1, 0));
+        assert_eq!(mixer.channel_gains(1, chan::WEAPON), Some((0.7, 0.7)));
+
+        // Reload keyframe sounds on CHAN_ITEM layer without cutting off each other or CHAN_WEAPON.
+        for reload in [
+            "weapons/ak47_clipout.wav",
+            "weapons/ak47_clipin.wav",
+            "weapons/ak47_boltpull.wav",
+        ] {
+            mixer.start_sound(
+                None,
+                &SoundStart::by_name(reload, 1, chan::ITEM, Vec3::ZERO, 0.8, 0.0, 100),
+                false,
+                None,
+            );
+        }
+        assert_eq!(mixer.active_channel_counts(), (4, 0));
+
+        // CHAN_AUTO layers freely without replacing anything.
+        mixer.start_sound(
+            None,
+            &SoundStart::by_name(
+                "weapons/ak47_clipout.wav",
+                1,
+                chan::AUTO,
+                Vec3::ZERO,
+                0.8,
+                0.0,
+                100,
+            ),
+            false,
+            None,
+        );
+        mixer.start_sound(
+            None,
+            &SoundStart::by_name(
+                "weapons/ak47_clipin.wav",
+                1,
+                chan::AUTO,
+                Vec3::ZERO,
+                0.8,
+                0.0,
+                100,
+            ),
+            false,
+            None,
+        );
+        assert_eq!(mixer.active_channel_counts(), (6, 0));
+
+        // Static world ambient sounds on entity 0 at distinct origins layer cleanly.
+        mixer.start_sound(
+            None,
+            &SoundStart::by_name(
+                "ambience/wind1.wav",
+                0,
+                chan::STATIC,
+                Vec3::new(100.0, 0.0, 0.0),
+                0.5,
+                0.8,
+                100,
+            ),
+            true,
+            None,
+        );
+        mixer.start_sound(
+            None,
+            &SoundStart::by_name(
+                "ambience/wind2.wav",
+                0,
+                chan::STATIC,
+                Vec3::new(-100.0, 0.0, 0.0),
+                0.5,
+                0.8,
+                100,
+            ),
+            true,
+            None,
+        );
+        assert_eq!(mixer.active_channel_counts(), (6, 2));
     }
 }

@@ -233,11 +233,11 @@ fn goldsrc_spatialize_no_wall_occlusion_plus_timescale_and_duplicate_jitter() {
     let (b_l, _) = mixer.channel_gains(12, 1).unwrap();
     assert!((b_l - c_l).abs() < 1e-6, "clear {c_l} vs blocked {b_l}");
 
-    // Duplicate dynamic sound receives 0..10% sample-rate jitter (`hw.dll:FUN_101fe3e0`).
+    // Retail CS 1.6 (`S_StartDynamicSound`) plays exact requested pitch with zero upward drift.
     let first_jitter = mixer.channel_rate_jitter(11, 1).unwrap();
     let dup_jitter = mixer.channel_rate_jitter(12, 1).unwrap();
     assert_eq!(first_jitter, 1.0);
-    assert!((1.0..=1.10).contains(&dup_jitter) && dup_jitter > 1.0, "{dup_jitter}");
+    assert_eq!(dup_jitter, 1.0);
 
     // Brush-model sound origin uses bbox center `origin + (mins + maxs) * 0.5`.
     assert_eq!(

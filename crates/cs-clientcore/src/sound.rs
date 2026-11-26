@@ -164,15 +164,78 @@ impl VoiceQueue {
     }
 }
 
+/// Sample path prefixes emitted by `PM_PlayStepSound` (`pm_shared/pm_shared.cpp`).
+const PLAYER_FOOTSTEP_PREFIXES: &[&str] = &[
+    "player/pl_step",
+    "player/pl_dirt",
+    "player/pl_duct",
+    "player/pl_grate",
+    "player/pl_metal",
+    "player/pl_slosh",
+    "player/pl_snow",
+    "player/pl_tile",
+    "player/pl_wade",
+    "player/pl_ladder",
+];
+
+/// Returns `true` when `name` belongs to one of the client-predicted `PM_PlayStepSound` footstep
+/// families (`player/pl_step*`, `pl_dirt*`, `pl_duct*`, `pl_grate*`, `pl_metal*`, `pl_slosh*`,
+/// `pl_snow*`, `pl_tile*`, `pl_wade*`, `pl_ladder*`).
+///
+/// Server-only player sounds (`player/pl_pain*`, `player/pl_fallpain*`, `player/pl_die*`,
+/// `player/pl_shot*`, `player/pl_swim*`) return `false`.
+pub fn is_player_footstep_sound(name: &str) -> bool {
+    let norm = name.trim().replace('\\', "/").to_ascii_lowercase();
+    let trimmed = norm.trim_start_matches(['/', '*']);
+    let rel = trimmed.strip_prefix("sound/").unwrap_or(trimmed);
+    PLAYER_FOOTSTEP_PREFIXES
+        .iter()
+        .any(|prefix| rel.starts_with(prefix))
+}
+
 /// The sound commands of the connection, in the order they were asked for.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SoundQueue {
     pending: Vec<SoundCommand>,
     /// `svc_sound` messages that named a sound index the server never precached.
     pub unknown_sounds: u32,
+    /// Local player entity index (`playernum + 1`) when known (`Some(ent)`).
+    local_entity: Option<u16>,
+    /// Whether client prediction (`cl_lw` / `!cl_nopred`) is active for local footsteps.
+    prediction_active: bool,
+    /// Incoming remote self-footstep `svc_sound` messages suppressed to prevent echo.
+    pub suppressed_local_steps: u32,
+}
+
+impl Default for SoundQueue {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            unknown_sounds: 0,
+            local_entity: None,
+            prediction_active: true,
+            suppressed_local_steps: 0,
+        }
+    }
 }
 
 impl SoundQueue {
+    /// Configures the local player entity (`playernum + 1`) and whether client footstep
+    /// prediction is active so incoming remote `player/pl_*` self-step `svc_sound` packets are
+    /// suppressed and never double-play / echo.
+    pub fn set_local_prediction(&mut self, local_entity: Option<u16>, prediction_active: bool) {
+        self.local_entity = local_entity.filter(|&e| e > 0);
+        self.prediction_active = prediction_active;
+    }
+
+    pub fn local_entity(&self) -> Option<u16> {
+        self.local_entity
+    }
+
+    pub fn prediction_active(&self) -> bool {
+        self.prediction_active
+    }
+
     /// Takes every command asked for since the last call.
     pub fn drain(&mut self) -> Vec<SoundCommand> {
         std::mem::take(&mut self.pending)
@@ -193,6 +256,18 @@ impl SoundQueue {
             self.pending.remove(0);
         }
         self.pending.push(command);
+    }
+
+    /// Handles one parsed svc message while updating the local prediction filter context.
+    pub fn handle_with_local(
+        &mut self,
+        msg: &SvcMessage,
+        precache: &PrecacheTables,
+        local_entity: Option<u16>,
+        prediction_active: bool,
+    ) {
+        self.set_local_prediction(local_entity, prediction_active);
+        self.handle(msg, precache);
     }
 
     /// Reacts to one parsed svc message; messages that are not about sound are ignored.
@@ -218,6 +293,14 @@ impl SoundQueue {
                     }
                     return;
                 };
+                if u32::from(flags) & SND_FL_STOP == 0
+                    && self.prediction_active
+                    && self.local_entity == Some(s.entity)
+                    && is_player_footstep_sound(&name)
+                {
+                    self.suppressed_local_steps = self.suppressed_local_steps.saturating_add(1);
+                    return;
+                }
                 let start = SoundStart {
                     name: Some(name),
                     index: s.sound_index,
@@ -326,7 +409,14 @@ mod tests {
     #[test]
     fn a_sound_starts_by_its_precache_name() {
         let mut q = SoundQueue::default();
-        q.handle(&sound(SND_FL_VOLUME | SND_FL_ATTENUATION | SND_FL_PITCH, chan::WEAPON, 7), &tables());
+        q.handle(
+            &sound(
+                SND_FL_VOLUME | SND_FL_ATTENUATION | SND_FL_PITCH,
+                chan::WEAPON,
+                7,
+            ),
+            &tables(),
+        );
         let SoundCommand::Start(s) = &q.pending()[0] else {
             panic!("{:?}", q.pending());
         };
@@ -515,5 +605,89 @@ mod tests {
         assert_eq!(vq.pending().len(), 2);
         assert_eq!(vq.drain().len(), 2);
         assert!(vq.pending().is_empty());
+    }
+
+    #[test]
+    fn suppresses_remote_local_footsteps_when_prediction_active_with_zero_leaks() {
+        let mut precache = PrecacheTables::default();
+        let step_samples = [
+            "player/pl_step1.wav",
+            "player/pl_dirt2.wav",
+            "player/pl_duct3.wav",
+            "player/pl_grate4.wav",
+            "player/pl_metal1.wav",
+            "player/pl_slosh2.wav",
+            "player/pl_snow3.wav",
+            "player/pl_tile5.wav",
+            "player/pl_wade4.wav",
+            "player/pl_ladder1.wav",
+            "SOUND\\PLAYER\\PL_STEP4.WAV",
+        ];
+        let keep_samples = [
+            "weapons/ak47-1.wav",
+            "player/pl_pain2.wav",
+            "player/pl_fallpain2.wav",
+            "player/pl_die1.wav",
+            "player/pl_swim1.wav",
+            "items/gunpickup2.wav",
+        ];
+        let mut entries = Vec::new();
+        for (i, &name) in step_samples.iter().chain(keep_samples.iter()).enumerate() {
+            entries.push(ResourceEntry {
+                res_type: crate::resources::res_type::SOUND,
+                filename: name.to_string(),
+                index: (i + 1) as u16,
+                download_size: 0,
+                flags: 0,
+                md5: None,
+                reserved: None,
+            });
+        }
+        precache.add(&entries);
+
+        let mk = |entity: u16, index: u16, flags: u16| {
+            SvcMessage::Sound(SoundMsg {
+                flags,
+                volume: 128,
+                attenuation: ATTN_NORM,
+                channel: chan::BODY,
+                entity,
+                sound_index: index,
+                origin: Vec3::ZERO,
+                pitch: PITCH_NORM,
+            })
+        };
+
+        let mut q = SoundQueue::default();
+        q.set_local_prediction(Some(3), true);
+
+        // Every predicted footstep family on local entity 3 is suppressed (0 leaks).
+        for idx in 1..=(step_samples.len() as u16) {
+            q.handle(&mk(3, idx, 0), &precache);
+        }
+        assert!(
+            q.pending().is_empty(),
+            "remote self-footsteps must never leak into SoundQueue"
+        );
+        assert_eq!(q.suppressed_local_steps, step_samples.len() as u32);
+
+        // Remote player entity 4 footsteps MUST still play.
+        q.handle(&mk(4, 1, 0), &precache);
+        assert_eq!(q.drain().len(), 1);
+
+        // Local non-footstep sounds (weapons, pain, fallpain, die, swim, pickup) MUST still play.
+        let keep_start = (step_samples.len() + 1) as u16;
+        for idx in keep_start..(keep_start + keep_samples.len() as u16) {
+            q.handle(&mk(3, idx, 0), &precache);
+        }
+        assert_eq!(q.drain().len(), keep_samples.len());
+
+        // SND_FL_STOP for local entity is never suppressed.
+        q.handle(&mk(3, 1, SND_FL_STOP as u16), &precache);
+        assert_eq!(q.drain().len(), 1);
+
+        // When prediction is disabled (e.g. cl_nopred 1), server footsteps for local entity play.
+        q.handle_with_local(&mk(3, 1, 0), &precache, Some(3), false);
+        assert_eq!(q.drain().len(), 1);
     }
 }

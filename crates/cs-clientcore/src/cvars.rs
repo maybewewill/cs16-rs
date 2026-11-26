@@ -22,9 +22,7 @@ pub const CVAR_PROTECTED: u32 = 1 << 4;
 
 /// Name prefixes a stufftext may not touch while `cl_filterstuffcmd` is on
 /// (`Cvar_ShouldSetCvar`, `Cmd_ShouldAllowCommand`).
-pub const FILTERED_PREFIXES: [&str; 8] = [
-    "cl_", "gl_", "m_", "r_", "hud_", "joy_", "con_", "scr_",
-];
+pub const FILTERED_PREFIXES: [&str; 8] = ["cl_", "gl_", "m_", "r_", "hud_", "joy_", "con_", "scr_"];
 
 /// One console variable.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +104,10 @@ impl ClientCvars {
             ("cl_minmodels", "0", CVAR_ARCHIVE),
             ("cl_min_ct", "2", CVAR_ARCHIVE),
             ("cl_min_t", "1", CVAR_ARCHIVE),
+            ("cl_hd_models", "0", CVAR_ARCHIVE),
+            ("snd_occlusion", "0", CVAR_ARCHIVE),
+            ("room_type", "0", 0),
+            ("room_off", "0", CVAR_ARCHIVE),
             ("fastsprites", "0", CVAR_ARCHIVE),
             ("max_smokepuffs", "120", CVAR_ARCHIVE),
             ("cl_timeout", "60", CVAR_ARCHIVE),
@@ -220,6 +222,12 @@ mod tests {
         assert_eq!(pairs["cl_lw"], "1");
         assert_eq!(pairs["model"], "gordon");
         assert!(!pairs.contains_key("cl_cmdrate"));
+        assert!(!pairs.contains_key("snd_occlusion"));
+        assert!(!pairs.contains_key("cl_hd_models"));
+        assert_eq!(c.string("cl_hd_models"), "0");
+        assert_eq!(c.string("snd_occlusion"), "0");
+        assert_eq!(c.string("room_type"), "0");
+        assert_eq!(c.string("room_off"), "0");
     }
 
     #[test]

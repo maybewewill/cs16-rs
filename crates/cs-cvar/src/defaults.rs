@@ -141,6 +141,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("room_off", "0", arch, "Disable EAX/DSP room reverb presets (0 or 1)");
     reg.register("s_show", "0", CVarFlags::NONE, "Show active mixer sound channels (0 or 1)");
     reg.register("s_occfactor", "0", arch, "Wall sound occlusion attenuation factor (0..1; 0 = classic unmuffled GoldSrc)");
+    reg.register("snd_occlusion", "0", arch, "Enable wall-occlusion audio low-pass filtering (0 = classic retail GoldSrc unmuffled, 1 = on)");
     reg.register("s_lerping", "1", arch, "Linear interpolation of sound samples during resampling (0 or 1)");
     reg.register("suitvolume", "0.25", arch, "HEV suit/VOX speech volume multiplier (0..1)");
     reg.register("voice_enable", "1", arch, "Enable incoming/outgoing voice chat (0 or 1)");

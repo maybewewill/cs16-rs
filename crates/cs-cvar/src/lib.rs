@@ -1932,6 +1932,10 @@ mod tests {
     fn bindtoggle_incrementvar_multvar_condump_userinfo_and_classic_defaults() {
         let mut reg = CVarRegistry::new_with_defaults();
         assert_eq!(reg.get_str("s_occfactor"), "0");
+        assert_eq!(reg.get_str("snd_occlusion"), "0");
+        assert_eq!(reg.get_str("cl_hd_models"), "0");
+        assert_eq!(reg.get_str("room_type"), "0");
+        assert_eq!(reg.get_str("room_off"), "0");
         assert_eq!(reg.get_str("s_lerping"), "1");
         assert_eq!(reg.get_str("hisound"), "1");
         assert_eq!(reg.get_str("cl_yawspeed"), "210");

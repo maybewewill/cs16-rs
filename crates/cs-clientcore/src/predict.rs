@@ -47,7 +47,9 @@ use cs_pm::physent::{
     self, CONTENTS_LADDER, MAX_MOVEENTS, MAX_PHYSENTS, PM_PLAYER_MAXS, PM_PLAYER_MINS, PhysEnt,
     PhysEntView, PhysModel, PmPhysEnts, PmTraceResult, world_physent,
 };
-use cs_pm::pm::consts::{CONTENTS_EMPTY, FL_BASEVELOCITY, FL_DUCKING, FL_ONGROUND, MOVETYPE_WALK};
+use cs_pm::pm::consts::{
+    CONTENTS_EMPTY, FL_BASEVELOCITY, FL_DUCKING, FL_FROZEN, FL_ONGROUND, MOVETYPE_WALK,
+};
 use cs_pm::pm::{MoveVars, PlayerMove, PmCmd, PmShared, PmTrace, PmWorld, pm_init, pm_move};
 use cs_proto48::delta::{GoldSrcEntityState, GoldSrcUserCmd, GoldSrcWeaponData};
 use cs_proto48::messages::MoveVarsMsg;
@@ -350,6 +352,9 @@ pub struct Carried {
     pub oldbuttons: i32,
     pub fl_fall_velocity: f32,
     pub i_step_left: i32,
+    /// Predicted `flTimeStepSound` at the acknowledged packet (`None` when the ack had no
+    /// matching prediction entry so server `clientdata.fl_time_step_sound` is authoritative).
+    pub fl_time_step_sound: Option<i32>,
     pub fuser2: f32,
     pub fl_duck_time: i32,
     pub b_in_duck: bool,
@@ -367,7 +372,7 @@ impl LocalState {
         let cd = frame.clientdata.as_ref()?;
         let ps: Option<&GoldSrcEntityState> = frame.entity(local).map(|e| &e.state);
         let flags = cd.flags as i32;
-        let (fuser2, fl_duck_time, b_in_duck, prev_weapon_id) = match carried {
+        let (fuser2, fl_duck_time, b_in_duck, fl_time_step_sound, prev_weapon_id) = match carried {
             Some(c) => {
                 // `clientdata.fuser2` is wire-quantized to integer steps (`DT_FLOAT(14, 1.0)`).
                 // Keep our predicted float stamina when the server agrees within wire rounding.
@@ -383,14 +388,43 @@ impl LocalState {
                 } else {
                     (cd.fl_duck_time, cd.b_in_duck != 0)
                 };
+                // Preserve `flTimeStepSound` phase across small tick/quantization jitter or
+                // servers that omit `flTimeStepSound` (`0` while grounded and unfrozen), while
+                // honoring genuine server resets (> 16 ms divergence, e.g. spawn/landing/unduck).
+                let fl_time_step_sound = match c.fl_time_step_sound {
+                    Some(carried_step) => {
+                        let omitted_on_ground = (flags & FL_ONGROUND != 0)
+                            && (flags & FL_FROZEN == 0)
+                            && cd.fl_time_step_sound == 0
+                            && carried_step > 0;
+                        if omitted_on_ground || (cd.fl_time_step_sound - carried_step).abs() <= 16 {
+                            carried_step
+                        } else {
+                            cd.fl_time_step_sound
+                        }
+                    }
+                    None => cd.fl_time_step_sound,
+                };
                 let prev_weapon_id = if c.prev_weapon_id != 0 {
                     c.prev_weapon_id
                 } else {
                     cd.m_i_id
                 };
-                (fuser2, fl_duck_time, b_in_duck, prev_weapon_id)
+                (
+                    fuser2,
+                    fl_duck_time,
+                    b_in_duck,
+                    fl_time_step_sound,
+                    prev_weapon_id,
+                )
             }
-            None => (cd.fuser2, cd.fl_duck_time, cd.b_in_duck != 0, cd.m_i_id),
+            None => (
+                cd.fuser2,
+                cd.fl_duck_time,
+                cd.b_in_duck != 0,
+                cd.fl_time_step_sound,
+                cd.m_i_id,
+            ),
         };
         let carried = carried.cloned().unwrap_or_default();
         Some(Self {
@@ -419,7 +453,7 @@ impl LocalState {
             fl_swim_time: cd.fl_swim_time,
             waterjumptime: cd.waterjumptime,
             b_in_duck,
-            fl_time_step_sound: cd.fl_time_step_sound,
+            fl_time_step_sound,
             maxspeed: cd.maxspeed,
             deadflag: cd.deadflag,
             health: cd.health,
@@ -444,6 +478,7 @@ impl LocalState {
             oldbuttons: self.oldbuttons,
             fl_fall_velocity: self.fl_fall_velocity,
             i_step_left: self.i_step_left,
+            fl_time_step_sound: Some(self.fl_time_step_sound),
             fuser2: self.fuser[1],
             fl_duck_time: self.fl_duck_time,
             b_in_duck: self.b_in_duck,
@@ -556,6 +591,8 @@ impl Prediction {
 #[derive(Debug, Clone)]
 struct PendingCmd {
     cmd: GoldSrcUserCmd,
+    /// Strictly monotonic local command ID (`1, 2, 3, ...`) guarding one-shot sound emission.
+    cmd_seq: u64,
     /// When the command was made (`senttime`).
     created_at: f64,
     /// The netchan sequence of the packet it went out in; `None` until it is sent.
@@ -616,6 +653,12 @@ pub struct Predictor {
     rng: u32,
     sounds: Vec<PredictedSound>,
     weapon_events: Vec<PredictedWeaponEvent>,
+    /// Next monotonic local command sequence number assigned in [`push_cmd`](Self::push_cmd).
+    next_cmd_seq: u64,
+    /// Highest `cmd_seq` already simulated once (`runfuncs = true`); replays never re-emit.
+    last_processed_cmd_seq: u64,
+    /// Highest `cmd_seq` that emitted a predicted footstep sound (`cmd_seq > last_step_emitted_seq`).
+    last_step_emitted_seq: u64,
     /// Mirrors `cl_lw` (`1` by default): when true, weapon prediction emits local events/sounds.
     pub cl_lw: bool,
     checks: VecDeque<PredictionCheck>,
@@ -651,6 +694,9 @@ impl Predictor {
             rng: 0x2545_f491,
             sounds: Vec::new(),
             weapon_events: Vec::new(),
+            next_cmd_seq: 1,
+            last_processed_cmd_seq: 0,
+            last_step_emitted_seq: 0,
             cl_lw: true,
             checks: VecDeque::new(),
             steps: Vec::new(),
@@ -713,8 +759,11 @@ impl Predictor {
         if self.cmds.len() >= MAX_PENDING_CMDS {
             self.cmds.pop_front();
         }
+        let cmd_seq = self.next_cmd_seq;
+        self.next_cmd_seq = self.next_cmd_seq.saturating_add(1);
         self.cmds.push_back(PendingCmd {
             cmd,
+            cmd_seq,
             created_at: self.now,
             sequence: None,
             random_seed: 0,
@@ -725,12 +774,7 @@ impl Predictor {
     /// `take` queued commands went out in the packet `sequence`; when the packet carried none
     /// the connection sent `placeholder` (the last command again, `msec` 0), which the server
     /// runs as a command of its own.
-    pub fn packet_sent(
-        &mut self,
-        sequence: u32,
-        take: usize,
-        placeholder: Option<GoldSrcUserCmd>,
-    ) {
+    pub fn packet_sent(&mut self, sequence: u32, take: usize, placeholder: Option<GoldSrcUserCmd>) {
         let count = self
             .cmds
             .iter()
@@ -751,14 +795,22 @@ impl Predictor {
             if self.cmds.len() >= MAX_PENDING_CMDS {
                 self.cmds.pop_front();
             }
+            let cmd_seq = self.next_cmd_seq;
+            self.next_cmd_seq = self.next_cmd_seq.saturating_add(1);
             self.cmds.push_back(PendingCmd {
                 cmd,
+                cmd_seq,
                 created_at: self.now,
                 sequence: Some(sequence),
                 random_seed: sequence,
                 processed: false,
             });
         }
+    }
+
+    /// Highest local command sequence that emitted a predicted footstep sound.
+    pub fn last_step_emitted_seq(&self) -> u64 {
+        self.last_step_emitted_seq
     }
 
     /// What the last update computed.
@@ -875,12 +927,20 @@ impl Predictor {
             Some((s, st)) if *s == ack => Some(st.clone()),
             _ => None,
         };
-        if let (Some(cd), true) = (frame.clientdata.as_ref(), self.is_predicted(inp.intermission))
-        {
+        if let (Some(cd), true) = (
+            frame.clientdata.as_ref(),
+            self.is_predicted(inp.intermission),
+        ) {
             self.check_prediction_error(ack, cd.origin, cd.velocity, inp.remote_is_local);
         }
         // `HUD_TxferPredictionData`: what the server never sends is kept from the prediction.
-        self.carried = predicted_state.as_ref().map(LocalState::carried);
+        // If `ack` is not in the prediction ring (e.g. packet loss or initial frames), retain
+        // `i_step_left` and non-wire state while deferring `fl_time_step_sound` to the server.
+        if let Some(st) = predicted_state.as_ref() {
+            self.carried = Some(st.carried());
+        } else if let Some(carried) = self.carried.as_mut() {
+            carried.fl_time_step_sound = None;
+        }
 
         while let Some(front) = self.cmds.front() {
             match front.sequence {
@@ -978,14 +1038,22 @@ impl Predictor {
         let mut ran = false;
         let mut lastground = self.out.lastground;
         for i in 0..self.cmds.len() {
-            let (cmd, runfuncs, random_seed, created_at) = {
+            let (cmd, cmd_seq, runfuncs, random_seed, created_at) = {
                 let c = &self.cmds[i];
-                (c.cmd.clone(), !c.processed, c.random_seed, c.created_at)
+                let is_new = !c.processed && c.cmd_seq > self.last_processed_cmd_seq;
+                (
+                    c.cmd.clone(),
+                    c.cmd_seq,
+                    is_new,
+                    c.random_seed,
+                    c.created_at,
+                )
             };
             let to = self.run_usercmd(
                 &ctx,
                 &from,
                 &cmd,
+                cmd_seq,
                 runfuncs,
                 random_seed,
                 &mut time,
@@ -997,6 +1065,9 @@ impl Predictor {
                 self.predicted[slot] = Some((seq, to.clone()));
             }
             self.cmds[i].processed = true;
+            if cmd_seq > self.last_processed_cmd_seq {
+                self.last_processed_cmd_seq = cmd_seq;
+            }
             prev = std::mem::replace(&mut from, to);
             prev_time = to_time;
             to_time = created_at;
@@ -1025,7 +1096,11 @@ impl Predictor {
         self.out.flags = s.flags;
         self.out.effects = s.effects;
         self.out.angles = s.angles;
-        self.out.onground = if s.flags & FL_ONGROUND != 0 { s.onground } else { -1 };
+        self.out.onground = if s.flags & FL_ONGROUND != 0 {
+            s.onground
+        } else {
+            -1
+        };
         self.out.moving = false;
         self.out.teleported = false;
         self.out.viewmodel = s.weapon.viewmodel;
@@ -1112,7 +1187,8 @@ impl Predictor {
                 0.0
             };
             // Make sure smoothtime is positive and bounded.
-            let smooth = if !self.settings.smoothtime.is_finite() || self.settings.smoothtime <= 0.0 {
+            let smooth = if !self.settings.smoothtime.is_finite() || self.settings.smoothtime <= 0.0
+            {
                 0.1
             } else {
                 self.settings.smoothtime.min(10.0)
@@ -1133,6 +1209,7 @@ impl Predictor {
         ctx: &RunCtx<'_>,
         from: &LocalState,
         cmd: &GoldSrcUserCmd,
+        cmd_seq: u64,
         runfuncs: bool,
         random_seed: u32,
         time: &mut f64,
@@ -1144,6 +1221,7 @@ impl Predictor {
                 ctx,
                 &state,
                 &step,
+                cmd_seq,
                 runfuncs && idx == 0,
                 random_seed,
                 time,
@@ -1161,6 +1239,7 @@ impl Predictor {
         ctx: &RunCtx<'_>,
         from: &LocalState,
         cmd: &GoldSrcUserCmd,
+        cmd_seq: u64,
         runfuncs: bool,
         random_seed: u32,
         time: &mut f64,
@@ -1184,7 +1263,9 @@ impl Predictor {
                 physents: ctx.physents,
                 rng: &mut self.rng,
                 now: self.now,
+                cmd_seq,
                 runfuncs,
+                last_step_emitted_seq: &mut self.last_step_emitted_seq,
                 sounds: &mut self.sounds,
             };
             pm_move(&mut pm, &mut self.pm_shared, &mut world, false);
@@ -1388,7 +1469,10 @@ pub fn build_physents(
             continue;
         }
         let skin = i32::from(state.skin);
-        let brush = match (kind, name.strip_prefix('*').and_then(|n| n.parse::<usize>().ok())) {
+        let brush = match (
+            kind,
+            name.strip_prefix('*').and_then(|n| n.parse::<usize>().ok()),
+        ) {
             (ModelKind::Brush, Some(m)) => Some(m),
             (ModelKind::Brush, None) if state.modelindex == 1 => Some(0),
             _ => None,
@@ -1436,7 +1520,10 @@ pub fn build_physents(
         if state.solid == SOLID_TRIGGER || (state.solid == SOLID_NOT && skin >= CONTENTS_EMPTY) {
             continue;
         }
-        if !matches!(state.solid, SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX | SOLID_NOT) {
+        if !matches!(
+            state.solid,
+            SOLID_BSP | SOLID_BBOX | SOLID_SLIDEBOX | SOLID_NOT
+        ) {
             continue;
         }
         // A dead body.
@@ -1471,14 +1558,12 @@ pub fn build_physents(
             continue;
         }
         let hull = usize::from(state.usehull).min(PM_PLAYER_MINS.len() - 1);
-        let (mins, maxs) = if state.solid == SOLID_BBOX
-            && state.mins != Vec3::ZERO
-            && state.maxs != Vec3::ZERO
-        {
-            (state.mins, state.maxs)
-        } else {
-            (PM_PLAYER_MINS[hull], PM_PLAYER_MAXS[hull])
-        };
+        let (mins, maxs) =
+            if state.solid == SOLID_BBOX && state.mins != Vec3::ZERO && state.maxs != Vec3::ZERO {
+                (state.mins, state.maxs)
+            } else {
+                (PM_PLAYER_MINS[hull], PM_PLAYER_MAXS[hull])
+            };
         // When standing on or jumping onto a live player's head (boost/runboost), collide
         // against the server's latest `state.origin` so `ex_interp` lag does not drop the
         // boosted player off a moving teammate.
@@ -1525,7 +1610,9 @@ struct ClientPmWorld<'a> {
     physents: &'a PmPhysEnts,
     rng: &'a mut u32,
     now: f64,
+    cmd_seq: u64,
     runfuncs: bool,
+    last_step_emitted_seq: &'a mut u64,
     sounds: &'a mut Vec<PredictedSound>,
 }
 
@@ -1570,7 +1657,11 @@ impl PmWorld for ClientPmWorld<'_> {
         ignore_pe: i32,
     ) -> PmTrace {
         if !in_world(start) || !in_world(end) {
-            return to_pm_trace(PmTraceResult::miss(if in_world(end) { end } else { Vec3::ZERO }));
+            return to_pm_trace(PmTraceResult::miss(if in_world(end) {
+                end
+            } else {
+                Vec3::ZERO
+            }));
         }
         to_pm_trace(physent::player_trace(
             self.coll,
@@ -1639,7 +1730,13 @@ impl PmWorld for ClientPmWorld<'_> {
         if !in_world(start) || !in_world(end) {
             return None;
         }
-        physent::trace_texture(self.coll, self.physents.physents_slice(), ground, start, end)
+        physent::trace_texture(
+            self.coll,
+            self.physents.physents_slice(),
+            ground,
+            start,
+            end,
+        )
     }
 
     fn play_sound(
@@ -1652,8 +1749,15 @@ impl PmWorld for ClientPmWorld<'_> {
         pitch: i32,
     ) {
         // `PM_PlaySound` plays through the world even when `runfuncs` is off in places (the
-        // water code); a replayed command must not play it again.
+        // water code); a replayed command must not play it again, and footsteps only emit once
+        // for strictly newer commands (`cmd_seq > last_step_emitted_seq`).
         if self.runfuncs {
+            if crate::sound::is_player_footstep_sound(sample) {
+                if self.cmd_seq <= *self.last_step_emitted_seq {
+                    return;
+                }
+                *self.last_step_emitted_seq = self.cmd_seq;
+            }
             if self.sounds.len() >= MAX_PENDING_SOUNDS {
                 self.sounds.remove(0);
             }
@@ -1688,7 +1792,9 @@ impl PmWorld for ClientPmWorld<'_> {
     }
 
     fn physent_has_model(&self, ent: i32) -> bool {
-        self.physents.physent(ent).is_some_and(|pe| pe.is_brush_model)
+        self.physents
+            .physent(ent)
+            .is_some_and(|pe| pe.is_brush_model)
     }
 }
 
@@ -1715,7 +1821,10 @@ mod tests {
     #[test]
     fn a_long_command_is_halved_and_only_the_first_half_keeps_the_impulse() {
         let steps = split_usercmd(&cmd(100));
-        let got: Vec<_> = steps.iter().map(|c| (c.msec, c.impulse, c.weaponselect)).collect();
+        let got: Vec<_> = steps
+            .iter()
+            .map(|c| (c.msec, c.impulse, c.weaponselect))
+            .collect();
         assert_eq!(got, vec![(50, 7, 3), (50, 0, 0)]);
         // 255 is halved three times, an odd millisecond is lost at every level.
         let steps = split_usercmd(&cmd(255));
@@ -1860,13 +1969,21 @@ mod tests {
         };
         let mut time = 1.0;
         let mut lastground = -1;
-        let to1 = pred.run_step(&ctx, &from, &cmd, true, 1, &mut time, &mut lastground);
+        let to1 = pred.run_step(&ctx, &from, &cmd, 1, true, 1, &mut time, &mut lastground);
         assert_eq!(to1.basevelocity, Vec3::ZERO);
         assert_eq!(to1.flags & FL_BASEVELOCITY, 0);
-        assert!(to1.velocity.x >= 95.0, "first step folds basevelocity: {}", to1.velocity.x);
+        assert!(
+            to1.velocity.x >= 95.0,
+            "first step folds basevelocity: {}",
+            to1.velocity.x
+        );
 
-        let to2 = pred.run_step(&ctx, &to1, &cmd, true, 2, &mut time, &mut lastground);
-        assert!(to2.velocity.x < 120.0, "second step must not re-add basevelocity: {}", to2.velocity.x);
+        let to2 = pred.run_step(&ctx, &to1, &cmd, 2, true, 2, &mut time, &mut lastground);
+        assert!(
+            to2.velocity.x < 120.0,
+            "second step must not re-add basevelocity: {}",
+            to2.velocity.x
+        );
     }
 
     #[test]
@@ -2052,13 +2169,16 @@ mod tests {
             model: PhysModel::Brush(1),
         });
         let mut rng = 1u32;
+        let mut last_step_seq = 0u64;
         let mut sounds = Vec::new();
         let mut pm_world = ClientPmWorld {
             coll: &coll,
             physents: &physents,
             rng: &mut rng,
             now: 0.0,
+            cmd_seq: 1,
             runfuncs: true,
+            last_step_emitted_seq: &mut last_step_seq,
             sounds: &mut sounds,
         };
 
@@ -2078,5 +2198,368 @@ mod tests {
             pm_world.trace_texture(0, Vec3::new(200.0, 0.0, 10.0), Vec3::new(200.0, 0.0, -10.0)),
             None
         );
+    }
+
+    fn flat_floor_world() -> Arc<WorldCollision> {
+        use cs_assets::bsp::{BspMap, BspModel, ClipNode, Leaf, LightmapAtlas, Node, Plane};
+        use cs_pm::pm::consts::CONTENTS_SOLID;
+
+        let bsp = BspMap {
+            name: "flat_floor".into(),
+            skyname: String::new(),
+            entities: Vec::new(),
+            spawns: Vec::new(),
+            hostage_spawns: Vec::new(),
+            brush_entities: Vec::new(),
+            planes: vec![
+                // Hull 0 point floor at z = 0
+                Plane {
+                    normal: Vec3::Z,
+                    dist: 0.0,
+                    plane_type: 2,
+                },
+                // Hull 1 standing player floor (mins.z = -36 -> origin.z = 36)
+                Plane {
+                    normal: Vec3::Z,
+                    dist: 36.0,
+                    plane_type: 2,
+                },
+                // Hull 3 ducking player floor (mins.z = -18 -> origin.z = 18)
+                Plane {
+                    normal: Vec3::Z,
+                    dist: 18.0,
+                    plane_type: 2,
+                },
+            ],
+            vertices_raw: Vec::new(),
+            visibility: Vec::new(),
+            nodes: vec![Node {
+                plane: 0,
+                children: [-1, -2],
+                mins: [-4096; 3],
+                maxs: [4096; 3],
+                first_face: 0,
+                num_faces: 0,
+            }],
+            texinfos: Vec::new(),
+            faces: Vec::new(),
+            lighting: Vec::new(),
+            clipnodes: vec![
+                ClipNode {
+                    plane: 1,
+                    children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+                },
+                ClipNode {
+                    plane: 2,
+                    children: [CONTENTS_EMPTY as i16, CONTENTS_SOLID as i16],
+                },
+            ],
+            leafs: vec![
+                Leaf {
+                    contents: CONTENTS_EMPTY,
+                    vis_offset: -1,
+                    mins: [0; 3],
+                    maxs: [0; 3],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+                Leaf {
+                    contents: CONTENTS_SOLID,
+                    vis_offset: -1,
+                    mins: [0; 3],
+                    maxs: [0; 3],
+                    first_mark_surface: 0,
+                    num_mark_surfaces: 0,
+                    ambient_levels: [0; 4],
+                },
+            ],
+            mark_surfaces: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            models: vec![BspModel {
+                mins: Vec3::new(-4096.0, -4096.0, -64.0),
+                maxs: Vec3::new(4096.0, 4096.0, 512.0),
+                origin: Vec3::ZERO,
+                head_nodes: [0, 0, -1, 1],
+                vis_leafs: 1,
+                first_face: 0,
+                num_faces: 0,
+            }],
+            textures: Vec::new(),
+            lightmap_atlas: LightmapAtlas {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+                packed_faces: 0,
+            },
+            render_vertices: Vec::new(),
+            render_indices: Vec::new(),
+            batches: Vec::new(),
+        };
+        Arc::new(WorldCollision::from_bsp(&bsp))
+    }
+
+    #[test]
+    fn footstep_prediction_240fps_50ms_rtt_300ms_rhythm_zero_echo_and_silent_walk() {
+        use crate::frames::FrameEntity;
+        use cs_pm::pm::consts::{IN_DUCK, IN_FORWARD};
+        use cs_proto48::delta::GoldSrcClientData;
+
+        let world = flat_floor_world();
+        let precache = PrecacheTables::default();
+        let mv = MoveVars {
+            footsteps: true,
+            accelerate: 5.0,
+            friction: 4.0,
+            stopspeed: 75.0,
+            maxspeed: 320.0,
+            ..MoveVars::default()
+        };
+
+        // Simulates 3.0s at 240 FPS (720 frames) with 50 ms RTT (12 frames ack lag) + extra
+        // render-only replay calls inside the RTT window. `server_step_mode`:
+        // 0 = exact server flTimeStepSound, 1 = +/-6ms tick jitter, 2 = server omits timer (0).
+        let simulate = |buttons: i32, forwardmove: f32, server_step_mode: u8| {
+            let mut pred = Predictor::new();
+            pred.set_world(Some(Arc::clone(&world)));
+
+            // Authoritative server-side movement state running the same commands 50ms behind.
+            let mut srv_state = LocalState {
+                origin: Vec3::new(0.0, 0.0, 36.03125),
+                velocity: Vec3::ZERO,
+                view_ofs: Vec3::new(0.0, 0.0, 17.0),
+                flags: FL_ONGROUND,
+                movetype: MOVETYPE_WALK,
+                onground: 0,
+                usehull: 0,
+                friction: 1.0,
+                gravity: 1.0,
+                maxspeed: 250.0,
+                health: 100.0,
+                ..LocalState::default()
+            };
+            let mut srv_pm_shared = pm_init(None);
+            let mut srv_physents = PmPhysEnts::default();
+            srv_physents.push_physent(world_physent(Some(&world)));
+
+            let make_frame =
+                |seq: u32, time: f64, st: &LocalState, step_override: Option<i32>| Frame {
+                    sequence: seq,
+                    valid: true,
+                    time,
+                    received_time: time,
+                    entities: vec![FrameEntity {
+                        state: GoldSrcEntityState {
+                            number: 1,
+                            modelindex: 1,
+                            movetype: st.movetype as u8,
+                            solid: 3,
+                            usehull: st.usehull as u8,
+                            friction: st.friction,
+                            gravity: st.gravity,
+                            origin: st.origin,
+                            mins: Vec3::new(-16.0, -16.0, -36.0),
+                            maxs: Vec3::new(16.0, 16.0, 36.0),
+                            ..GoldSrcEntityState::default()
+                        },
+                        is_new: false,
+                    }],
+                    clientdata: Some(GoldSrcClientData {
+                        origin: st.origin,
+                        velocity: st.velocity,
+                        view_ofs: st.view_ofs,
+                        flags: st.flags as u32,
+                        maxspeed: st.maxspeed,
+                        health: st.health,
+                        b_in_duck: i32::from(st.b_in_duck),
+                        fl_duck_time: st.fl_duck_time,
+                        fl_time_step_sound: step_override.unwrap_or(st.fl_time_step_sound),
+                        ..GoldSrcClientData::default()
+                    }),
+                    weapon_data: Default::default(),
+                };
+
+            let fps = 240.0f64;
+            let dt = 1.0 / fps;
+            let rtt_frames: usize = 12; // 12 / 240s = 50.0 ms RTT
+            let total_frames: usize = 720; // 3.0 seconds
+
+            let mut in_flight: VecDeque<(u32, f64, GoldSrcUserCmd)> = VecDeque::new();
+            let mut current_frame = make_frame(1, 0.0, &srv_state, None);
+            let mut frame_seq = 1u32;
+            let mut ack_seq = 0u32;
+            let mut msec_rem = 0.0f64;
+            let mut step_events: Vec<(f64, String)> = Vec::new();
+            let mut replay_extra_steps = 0usize;
+            let mut last_seq_seen = 0u64;
+            let mut srv_rng = 7u32;
+            let mut srv_last_step = 0u64;
+            let mut srv_sounds = Vec::new();
+
+            for f in 1..=total_frames {
+                let now = (f as f64) * dt;
+                msec_rem += dt * 1000.0;
+                let msec = msec_rem.floor() as u8;
+                msec_rem -= f64::from(msec);
+
+                let usercmd = GoldSrcUserCmd {
+                    msec,
+                    buttons: buttons as u16,
+                    forwardmove,
+                    ..GoldSrcUserCmd::default()
+                };
+                let pkt_seq = f as u32;
+                pred.set_now(now);
+                pred.push_cmd(usercmd.clone());
+                pred.packet_sent(pkt_seq, 1, None);
+                in_flight.push_back((pkt_seq, now, usercmd));
+
+                // Deliver delayed server frame after 50 ms RTT.
+                if in_flight.len() > rtt_frames {
+                    let (acked, ack_time, srv_cmd) = in_flight.pop_front().unwrap();
+                    let ctx = RunCtx {
+                        coll: &world,
+                        physents: &srv_physents,
+                        player_index: 0,
+                        multiplayer: true,
+                        movevars: mv,
+                    };
+                    let mut pm = setup_pmove(&ctx, &srv_state, &srv_cmd, true, ack_time);
+                    {
+                        let mut sw = ClientPmWorld {
+                            coll: &world,
+                            physents: &srv_physents,
+                            rng: &mut srv_rng,
+                            now: ack_time,
+                            cmd_seq: u64::from(acked),
+                            runfuncs: true,
+                            last_step_emitted_seq: &mut srv_last_step,
+                            sounds: &mut srv_sounds,
+                        };
+                        pm_move(&mut pm, &mut srv_pm_shared, &mut sw, true);
+                    }
+                    finish_pmove(&pm, &mut srv_state);
+                    ack_seq = acked;
+                    frame_seq += 1;
+                    let step_override = match server_step_mode {
+                        1 => Some(
+                            (srv_state.fl_time_step_sound + if f % 2 == 0 { 6 } else { -6 }).max(0),
+                        ),
+                        2 => Some(0),
+                        _ => None,
+                    };
+                    current_frame = make_frame(frame_seq, ack_time, &srv_state, step_override);
+                }
+
+                let inp = PredictInputs {
+                    now,
+                    incoming_acknowledged: ack_seq,
+                    outgoing_sequence: pkt_seq + 1,
+                    frame: Some(&current_frame),
+                    playernum: 0,
+                    max_clients: 10,
+                    precache: &precache,
+                    movevars: mv,
+                    max_velocity: 2000.0,
+                    poses: &[],
+                    entities: None,
+                    remote_is_local: false,
+                    intermission: false,
+                };
+                pred.update(&inp);
+                for s in pred.take_sounds() {
+                    if crate::sound::is_player_footstep_sound(&s.sample) {
+                        assert!(
+                            pred.last_step_emitted_seq() > last_seq_seen,
+                            "step emitted without advancing cmd_seq"
+                        );
+                        last_seq_seen = pred.last_step_emitted_seq();
+                        step_events.push((now, s.sample));
+                    }
+                }
+
+                // Extra render-only replay call inside the RTT window (no new usercmd): must emit 0 steps.
+                pred.update(&inp);
+                replay_extra_steps += pred
+                    .take_sounds()
+                    .into_iter()
+                    .filter(|s| crate::sound::is_player_footstep_sound(&s.sample))
+                    .count();
+            }
+
+            (step_events, replay_extra_steps, pred.prediction().simorg)
+        };
+
+        // 1. Running at 250 u/s for 3.0s at 240 FPS + 50 ms RTT across exact, jittered, and omitted timer modes.
+        for mode in [0u8, 1, 2] {
+            let (steps, replay_dups, final_org) = simulate(IN_FORWARD, 250.0, mode);
+            assert_eq!(
+                replay_dups, 0,
+                "mode {mode}: replay must emit 0 duplicate/echo steps"
+            );
+            assert!(
+                final_org.x > 650.0,
+                "mode {mode}: runner should cover ~720u in 3s, got {}",
+                final_org.x
+            );
+            assert!(
+                (8..=10).contains(&steps.len()),
+                "mode {mode}: expected ~9 footsteps in 3.0s at 300ms cadence, got {} ({steps:?})",
+                steps.len()
+            );
+
+            // Check exact ~300 ms rhythm and strict alternating left ({2,4}) / right ({1,3}) feet.
+            let mut prev_is_left: Option<bool> = None;
+            for pair in steps.windows(2) {
+                let dt_ms = (pair[1].0 - pair[0].0) * 1000.0;
+                assert!(
+                    (290.0..=315.0).contains(&dt_ms),
+                    "mode {mode}: expected ~300ms step interval, got {dt_ms:.2}ms between {:?} and {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            for (_, sample) in &steps {
+                let is_left = sample.ends_with("2.wav") || sample.ends_with("4.wav");
+                let is_right = sample.ends_with("1.wav") || sample.ends_with("3.wav");
+                assert!(is_left ^ is_right, "unexpected step sample {sample}");
+                if let Some(prev) = prev_is_left {
+                    assert_ne!(
+                        is_left, prev,
+                        "mode {mode}: footsteps must strictly alternate left/right ({steps:?})"
+                    );
+                }
+                prev_is_left = Some(is_left);
+            }
+        }
+
+        // 2. +speed walking (250 * 0.52 = 130 u/s <= 150 u/s): 0 footsteps over 3.0s.
+        let (walk_steps, walk_dups, walk_org) = simulate(IN_FORWARD, 130.0, 0);
+        assert!(
+            walk_org.x > 300.0,
+            "walker must actually move forward: {}",
+            walk_org.x
+        );
+        assert_eq!(
+            walk_steps.len(),
+            0,
+            "+speed walking <= 150 u/s must be silent: {walk_steps:?}"
+        );
+        assert_eq!(walk_dups, 0);
+
+        // 3. Crouch-walking (+duck + +forward -> ~46 u/s steady-state <= 150 u/s): 0 footsteps over 3.0s.
+        let (duck_steps, duck_dups, duck_org) = simulate(IN_FORWARD | IN_DUCK, 250.0, 0);
+        assert!(
+            duck_org.x > 100.0,
+            "crouch-walker must actually move forward: {}",
+            duck_org.x
+        );
+        assert_eq!(
+            duck_steps.len(),
+            0,
+            "crouch-walking must be silent: {duck_steps:?}"
+        );
+        assert_eq!(duck_dups, 0);
     }
 }

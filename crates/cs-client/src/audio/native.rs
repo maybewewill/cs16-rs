@@ -66,6 +66,7 @@ enum AudioCommand {
         hisound: bool,
     },
     SetTimescale(f32),
+    SetSndOcclusion(bool),
     UpdateListener {
         listener: ListenerState,
         /// Sorted `(entity_index, origin)` pairs for `O(log N)` lookup on the audio thread.
@@ -175,6 +176,7 @@ impl SharedMixerSource {
                 mixer.set_resampling(lerping, hisound);
             }
             AudioCommand::SetTimescale(ts) => mixer.set_timescale(ts),
+            AudioCommand::SetSndOcclusion(enabled) => mixer.set_snd_occlusion(enabled),
             AudioCommand::UpdateListener {
                 listener,
                 entity_positions,
@@ -273,6 +275,18 @@ impl OfflineAudioMixer {
         self.source.mixer.room_type()
     }
 
+    pub fn room_off(&self) -> bool {
+        self.source.mixer.room_off()
+    }
+
+    pub fn snd_occlusion(&self) -> bool {
+        self.source.mixer.snd_occlusion()
+    }
+
+    pub fn channel_gains(&self, entity: u16, channel: u8) -> Option<(f32, f32)> {
+        self.source.mixer.channel_gains(entity, channel)
+    }
+
     pub fn format_sound_list(&self) -> String {
         self.source.mixer.format_sound_list()
     }
@@ -358,22 +372,21 @@ impl AudioEngine {
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel::<AudioCommand>(AUDIO_CMD_QUEUE_CAPACITY);
         let source = SharedMixerSource::new(GoldSrcMixer::new(), cmd_rx);
-        let (sink, mixer_player) = match DeviceSinkBuilder::from_default_device()
-            .and_then(|b| b.open_stream())
-        {
-            Ok(mut s) => {
-                s.log_on_drop(false);
-                let player = Player::connect_new(s.mixer());
-                player.append(source);
-                info!("Initialized lock-free GoldSrc audio mixer stream");
-                (Some(s), Some(player))
-            }
-            Err(err) => {
-                drop(source);
-                warn!(%err, "Audio output unavailable; running muted");
-                (None, None)
-            }
-        };
+        let (sink, mixer_player) =
+            match DeviceSinkBuilder::from_default_device().and_then(|b| b.open_stream()) {
+                Ok(mut s) => {
+                    s.log_on_drop(false);
+                    let player = Player::connect_new(s.mixer());
+                    player.append(source);
+                    info!("Initialized lock-free GoldSrc audio mixer stream");
+                    (Some(s), Some(player))
+                }
+                Err(err) => {
+                    drop(source);
+                    warn!(%err, "Audio output unavailable; running muted");
+                    (None, None)
+                }
+            };
         Self {
             sink,
             _mixer_player: mixer_player,
@@ -552,11 +565,17 @@ impl AudioEngine {
         {
             self.last_mixer_params = Some(key);
         }
-        self.music.set_params(mp3_volume, bgm_enabled, mp3_fade_time);
+        self.music
+            .set_params(mp3_volume, bgm_enabled, mp3_fade_time);
     }
 
     pub fn set_timescale(&mut self, timescale: f32) {
         let _ = self.try_send(AudioCommand::SetTimescale(timescale));
+    }
+
+    /// Toggles optional wall-occlusion LPF (`snd_occlusion`, default `false` for authentic GoldSrc).
+    pub fn set_snd_occlusion(&mut self, enabled: bool) {
+        let _ = self.try_send(AudioCommand::SetSndOcclusion(enabled));
     }
 
     pub fn format_sound_list(&self) -> String {
@@ -629,7 +648,8 @@ impl AudioEngine {
                         continue;
                     };
                     if let Ok(bytes) = v.read_bytes(&path)
-                        && let Ok(decoder) = Decoder::new(Cursor::new(SharedBytes(Arc::from(bytes))))
+                        && let Ok(decoder) =
+                            Decoder::new(Cursor::new(SharedBytes(Arc::from(bytes))))
                     {
                         let player = Player::connect_new(sink.mixer());
                         player.set_volume(volume.clamp(0.0, 1.0));
@@ -692,7 +712,11 @@ impl AudioEngine {
         });
     }
 
-    fn predecode_vox_words(&mut self, vfs: Option<&Vfs>, words: &[VoxWord]) -> Vec<PredecodedVoxWord> {
+    fn predecode_vox_words(
+        &mut self,
+        vfs: Option<&Vfs>,
+        words: &[VoxWord],
+    ) -> Vec<PredecodedVoxWord> {
         let mut out = Vec::with_capacity(words.len());
         for w in words {
             let wav = self
@@ -966,7 +990,11 @@ impl AudioEngine {
             if idx < 32 && (muted_mask & (1u32 << idx)) != 0 {
                 continue;
             }
-            let p_scale = player_scales.get(idx).copied().unwrap_or(1.0).clamp(0.0, 2.0);
+            let p_scale = player_scales
+                .get(idx)
+                .copied()
+                .unwrap_or(1.0)
+                .clamp(0.0, 2.0);
             let gain = voice_scale * p_scale;
             if gain > 0.0 && !samples.is_empty() {
                 let _ = self.try_send(AudioCommand::PushVoicePcm {
@@ -1128,7 +1156,10 @@ mod tests {
     fn predecoded_wav_cache_reuses_arc_with_zero_repeated_vfs_reads() {
         let reads = Arc::new(AtomicUsize::new(0));
         let mut files = HashMap::new();
-        files.insert("sound/weapons/ak47-1.wav".to_string(), sine_wav(520.0, 2_000));
+        files.insert(
+            "sound/weapons/ak47-1.wav".to_string(),
+            sine_wav(520.0, 2_000),
+        );
         let vfs = Vfs::from_backend(Arc::new(CountingVfsBackend {
             files,
             reads: Arc::clone(&reads),
@@ -1145,11 +1176,22 @@ mod tests {
         let second = engine
             .load_or_decode_wav(Some(&vfs), "WEAPONS\\AK47-1.WAV")
             .expect("cache hit");
-        assert_eq!(reads.load(Ordering::Relaxed), 1, "cache hit must not touch VFS");
-        assert!(Arc::ptr_eq(&first, &second), "cache hit must share identical Arc<DecodedWav>");
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "cache hit must not touch VFS"
+        );
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache hit must share identical Arc<DecodedWav>"
+        );
 
         engine.play_2d(Some(&vfs), "weapons/ak47-1.wav", 1.0);
-        assert_eq!(reads.load(Ordering::Relaxed), 1, "playing cached WAV must not touch VFS");
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            1,
+            "playing cached WAV must not touch VFS"
+        );
 
         let mut buf = vec![0.0f32; 1024];
         offline.mix_samples(&mut buf);
@@ -1160,10 +1202,22 @@ mod tests {
     fn signon_precache_warmup_decodes_common_wavs_before_round_one() {
         let reads = Arc::new(AtomicUsize::new(0));
         let mut files = HashMap::new();
-        files.insert("sound/weapons/ak47-1.wav".to_string(), sine_wav(440.0, 2_000));
-        files.insert("sound/player/pl_step1.wav".to_string(), sine_wav(220.0, 1_500));
-        files.insert("sound/ui/buttonclick.wav".to_string(), sine_wav(880.0, 1_000));
-        files.insert("sound/ambience/wind_long.wav".to_string(), sine_wav(110.0, 2_000));
+        files.insert(
+            "sound/weapons/ak47-1.wav".to_string(),
+            sine_wav(440.0, 2_000),
+        );
+        files.insert(
+            "sound/player/pl_step1.wav".to_string(),
+            sine_wav(220.0, 1_500),
+        );
+        files.insert(
+            "sound/ui/buttonclick.wav".to_string(),
+            sine_wav(880.0, 1_000),
+        );
+        files.insert(
+            "sound/ambience/wind_long.wav".to_string(),
+            sine_wav(110.0, 2_000),
+        );
         let vfs = Vfs::from_backend(Arc::new(CountingVfsBackend {
             files,
             reads: Arc::clone(&reads),
@@ -1188,7 +1242,10 @@ mod tests {
 
         let (mut engine, mut offline) = AudioEngine::new_offline();
         let warmed = engine.warmup_precache(&vfs, &precache);
-        assert_eq!(warmed, 3, "expected ak47, pl_step1, and ui/buttonclick warmed");
+        assert_eq!(
+            warmed, 3,
+            "expected ak47, pl_step1, and ui/buttonclick warmed"
+        );
         assert!(engine.is_wav_cached("weapons/ak47-1.wav"));
         assert!(engine.is_wav_cached("player/pl_step1.wav"));
         assert!(engine.is_wav_cached("UI/buttonclick.wav"));
@@ -1222,16 +1279,24 @@ mod tests {
     #[test]
     fn vox_sentences_predecode_on_main_thread_and_mix_on_audio_thread() {
         let mut files = HashMap::new();
-        files.insert("sound/radio/locknload.wav".to_string(), sine_wav(380.0, 2_000));
+        files.insert(
+            "sound/radio/locknload.wav".to_string(),
+            sine_wav(380.0, 2_000),
+        );
         let vfs = Vfs::from_memory(files);
 
         let (mut engine, mut offline) = AudioEngine::new_offline();
-        engine.set_sentences(SentenceTable::parse("MRAD_LOCKNLOAD radio/locknload(v100 s10 e90)"));
+        engine.set_sentences(SentenceTable::parse(
+            "MRAD_LOCKNLOAD radio/locknload(v100 s10 e90)",
+        ));
         engine.set_params(1.0, 1.0, true, 0.0, true, true, 0.5, true, 2.0);
         engine.play_send_audio(Some(&vfs), "%!MRAD_LOCKNLOAD", 1.0, 100);
 
         let mut out = vec![0.0f32; 2048];
         offline.mix_samples(&mut out);
-        assert!(rms(&out) > 0.1, "pre-decoded VOX sentence must render on audio thread");
+        assert!(
+            rms(&out) > 0.1,
+            "pre-decoded VOX sentence must render on audio thread"
+        );
     }
 }
