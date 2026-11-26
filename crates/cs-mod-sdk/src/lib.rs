@@ -4,8 +4,9 @@
 //! - On native targets (`#[cfg(not(target_arch = "wasm32"))]`), [`MockHostBridge`] lets every
 //!   Rust mod run fast deterministic `cargo test` suites in milliseconds.
 //! - On `wasm32-unknown-unknown`, guest `cdylib` mod crates invoke
-//!   [`cs16_wasm_host_bridge!`] to bind every `"cs16_mod"` ABI v1 + v2 import cleanly without
-//!   compromising the workspace-wide `#![forbid(unsafe_code)]` rule.
+//!   [`cs16_wasm_host_bridge!`] and [`cs16_wasm_exports!`] to bind every `"cs16_mod"` ABI v1 + v2
+//!   import and export cleanly without compromising the workspace-wide `#![forbid(unsafe_code)]`
+//!   rule.
 
 pub mod bridge;
 #[cfg(not(target_arch = "wasm32"))]

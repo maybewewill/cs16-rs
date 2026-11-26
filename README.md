@@ -140,22 +140,30 @@ def cmd_rs(player, args):
 Or scaffold a compiled, `#![forbid(unsafe_code)]` Rust WASM mod (`cargo xtask mod new hello --lang rust` — C++20 and Go also supported):
 
 ```rust
-use cs_mod_sdk::{HookAction, HookId, HookPhase, HostBridge, Player, cs_mod_init, vfx};
+use cs_mod_sdk::{
+    HookAction, HookId, HookPhase, HostBridge, Player, cs_mod_hook, cs_mod_init, vfx,
+};
+
 cs_mod_sdk::cs16_wasm_host_bridge!();
 
 #[cs_mod_init]
-pub fn init(host: &mut impl HostBridge) -> i32 {
-    host.hook_register(HookId::PlayerSpawn, HookPhase::Post, 0); 0
+pub fn init_mod(host: &mut impl HostBridge) -> i32 {
+    host.hook_register(HookId::PlayerSpawn, HookPhase::Post, 0);
+    0
 }
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_hook(hook_id: i32, phase: i32) -> i32 {
-    let mut host = cs_mod_sdk::WasmHostBridge;
-    if HookId::from_i32(hook_id) == Some(HookId::PlayerSpawn) && phase == HookPhase::Post as i32 {
-        if let Some(pos) = Player::new(host.hook_arg_i32(0) as u8).origin(&host) {
-            vfx::shockwave_ring(&mut host, pos, 160.0, [255, 176, 0, 220], 6, 12, None);
-        }
+
+#[cs_mod_hook(PlayerSpawn, post)]
+pub fn on_player_spawn(host: &mut impl HostBridge) -> HookAction {
+    let slot = host.hook_arg_i32(0).clamp(0, 31) as u8;
+    if let Some(pos) = Player::new(slot).origin(host) {
+        vfx::shockwave_ring(host, pos, 160.0, [255, 176, 0, 220], 6, 12, None);
     }
-    HookAction::Continue as i32
+    HookAction::Continue
+}
+
+cs_mod_sdk::cs16_wasm_exports! {
+    init: init_mod,
+    hooks: [(HookId::PlayerSpawn, HookPhase::Post) => on_player_spawn],
 }
 ```
 
@@ -271,7 +279,7 @@ flowchart TD
 | `cs-mod-api` | Versioned ABI v2 types, ReAPI hooks, `CustomWeaponSpec`, `VfxOp`, `MenuManager`, `LangCatalog`, `AdminRegistry`, `NVaultStore`, `RpcBus`, `.csmod` |
 | `cs-mod-host` | Deterministic `wasmi` host + WASI preview1 shims, unified AMXX/Python orchestrator, ResMon profiler, `ModFaultDump` crash recorder, `--import-amxx` |
 | `cs-mod-py` | Zero-compile, fuel-metered, `wasm32`-clean pure-Rust Python 3 plugin runtime with live hot-reload |
-| `cs-mod-macros` | Attribute macros (`#[cs_mod_init]`, `#[cs_mod_hook]`, `#[cs_mod_hud]`, `#[cs_mod_command]`, `#[cs_mod_rpc]`, `#[cs_mod_event]`) |
+| `cs-mod-macros` | Attribute macros (`#[cs_mod_init]`, `#[cs_mod_hook]`, `#[cs_mod_chat]`, `#[cs_mod_cmd]`, `#[cs_mod_hud]`) |
 | `cs-mod-sdk` | Ergonomic Rust guest WASM SDK (`HostBridge`, `MockHostBridge`, `Player`, `vfx`, `CustomWeaponBuilder`, `PaginatedMenu`) |
 | `cs-clientcore` | Platform-free Protocol 48 client: signon, interpolation, `NetGraphTelemetry`, `.dem` player, `cs-pm` & `cl_lw 1` weapon prediction, HUD state |
 | `cs-client` | Shared `wgpu 30` renderer (GPU `.mdl` skinning, 1-draw-call sprites, cached gamma), lock-free GoldSrc audio + Steam Voice, authentic VGUI2/HUD, native `winit` shell |

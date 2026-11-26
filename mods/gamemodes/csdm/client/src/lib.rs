@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use cs_mod_sdk::{HostBridge, HudCanvas, vgui};
+use cs_mod_sdk::{HookAction, HostBridge, HudCanvas, cs_mod_hud, vgui};
 
 cs_mod_sdk::cs16_wasm_host_bridge!();
 
@@ -26,21 +26,21 @@ pub fn render_csdm_hud(host: &mut impl HostBridge, health: i32) {
     canvas.flush(host);
 }
 
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_client_hud(_dt_ms: i32, health: i32, _armor: i32, _money: i32) {
-    let mut host = WasmHostBridge;
-    render_csdm_hud(&mut host, health);
+#[cs_mod_hud]
+pub fn on_csdm_hud(host: &mut impl HostBridge, _dt_ms: i32, health: i32, _armor: i32, _money: i32) {
+    render_csdm_hud(host, health);
 }
 
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_client_usermsg() -> i32 {
-    let host = WasmHostBridge;
+pub fn on_csdm_usermsg(host: &mut impl HostBridge) -> HookAction {
     let payload = host.hook_arg_bytes();
     if payload.len() >= 2 {
         STREAK.store(payload[0], Ordering::Relaxed);
         PROTECTED.store(payload[1], Ordering::Relaxed);
     }
-    1
+    HookAction::Handled
+}
+
+cs_mod_sdk::cs16_wasm_exports! {
+    client_hud: on_csdm_hud,
+    client_usermsg: on_csdm_usermsg,
 }

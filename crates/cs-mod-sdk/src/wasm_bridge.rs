@@ -1,12 +1,14 @@
-//! Zero-`unsafe` macro generator emitting the `wasm32` `"cs16_mod"` host import bindings and
-//! `WasmHostBridge` implementation inside standalone guest `.wasm` mod crates.
+//! Zero-`unsafe` macro generators emitting the `wasm32` `"cs16_mod"` host import bindings,
+//! `WasmHostBridge` implementation, and ABI v2 `cs_mod_*` exports inside standalone guest `.wasm`
+//! mod crates.
 //!
-//! Why a macro? In Rust edition 2024, `extern "C"` import blocks and `#[unsafe(no_mangle)]`
+//! Why macros? In Rust edition 2024, `extern "C"` import blocks and `#[unsafe(no_mangle)]`
 //! require explicit `unsafe` syntax which triggers `#![forbid(unsafe_code)]` on workspace crates.
-//! Defining the bindings in a `macro_rules!` keeps `cs-mod-sdk` 100% `#![forbid(unsafe_code)]`
-//! across all workspace targets (including `wasm32-unknown-unknown`) while allowing external
-//! `cdylib` guest mod crates (`mods/*`) to materialize the exact `cs16_mod` ABI v2 WASM imports
-//! in a single line: `cs_mod_sdk::cs16_wasm_host_bridge!();`.
+//! Defining the bindings and exports in `macro_rules!` keeps `cs-mod-sdk` 100%
+//! `#![forbid(unsafe_code)]` across all workspace targets (including `wasm32-unknown-unknown`)
+//! while allowing external `cdylib` guest mod crates (`mods/*`) to wire the exact `cs16_mod` ABI
+//! v2 imports and exports cleanly via `cs_mod_sdk::cs16_wasm_host_bridge!();` and
+//! `cs_mod_sdk::cs16_wasm_exports! { ... }`.
 
 /// Materializes `mod raw` (all `"cs16_mod"` ABI v1 + v2 WASM imports matching `WasmiRuntime`)
 /// and `pub struct WasmHostBridge` implementing [`crate::HostBridge`] inside a guest `wasm32` mod.
@@ -1425,5 +1427,152 @@ macro_rules! cs16_wasm_host_bridge {
                 )
             }
         }
+    };
+}
+
+/// Materializes `wasm32` ABI v2 `extern "C"` entrypoints (`cs_mod_init`, `cs_mod_hook`,
+/// `cs_mod_timer`, `cs_mod_menu`, `cs_mod_rpc`, `cs_mod_event`, `cs_mod_webhook`,
+/// `cs_mod_client_hud`, `cs_mod_client_usermsg`, `cs_mod_client_input`) inside a guest mod crate
+/// without repeating raw `#[unsafe(no_mangle)]` boilerplate.
+///
+/// Requires [`cs16_wasm_host_bridge!`] to be invoked in the same module.
+/// On non-`wasm32` targets this expands to nothing so native tests and libraries stay 100%
+/// `#![forbid(unsafe_code)]`.
+#[macro_export]
+macro_rules! cs16_wasm_exports {
+    () => {};
+    (init: $init_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_init() -> i32 {
+            let mut host = WasmHostBridge;
+            $init_fn(&mut host)
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (hook: $hook_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_hook(hook_id: i32, phase: i32) -> i32 {
+            let (Some(hook), Some(ph)) = (
+                $crate::HookId::from_i32(hook_id),
+                $crate::HookPhase::from_i32(phase),
+            ) else {
+                return $crate::HookAction::Continue as i32;
+            };
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = $hook_fn(&mut host, hook, ph);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (hooks: [ $( ($hook_id:path, $phase:path) => $handler:path ),* $(,)? ] $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        #[allow(clippy::single_match)]
+        pub extern "C" fn cs_mod_hook(hook_id: i32, phase: i32) -> i32 {
+            let (Some(hook), Some(ph)) = (
+                $crate::HookId::from_i32(hook_id),
+                $crate::HookPhase::from_i32(phase),
+            ) else {
+                return $crate::HookAction::Continue as i32;
+            };
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = match (hook, ph) {
+                $( ($hook_id, $phase) => $handler(&mut host), )*
+                _ => $crate::HookAction::Continue,
+            };
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (timer: $timer_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_timer(cb_id: i32, arg: i32) -> i32 {
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = $timer_fn(&mut host, cb_id, arg);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (menu: $menu_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_menu(
+            cb_id: i32,
+            slot: i32,
+            menu_id: i32,
+            item_index: i32,
+        ) -> i32 {
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction =
+                $menu_fn(&mut host, cb_id, slot.clamp(0, 31) as u8, menu_id as u32, item_index);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (rpc: $rpc_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_rpc(cb_id: i32) -> i32 {
+            let mut host = WasmHostBridge;
+            $rpc_fn(&mut host, cb_id)
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (event: $event_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_event(cb_id: i32) -> i32 {
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = $event_fn(&mut host, cb_id);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (webhook: $webhook_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_webhook(cb_id: i32, status: i32) -> i32 {
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = $webhook_fn(&mut host, cb_id, status);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (client_hud: $hud_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_client_hud(
+            dt_ms: i32,
+            health: i32,
+            armor: i32,
+            money: i32,
+        ) {
+            let mut host = WasmHostBridge;
+            $hud_fn(&mut host, dt_ms, health, armor, money);
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (client_usermsg: $usermsg_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_client_usermsg() -> i32 {
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = $usermsg_fn(&mut host);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
+    };
+    (client_input: $input_fn:path $(, $($rest:tt)*)?) => {
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cs_mod_client_input(key: i32, pressed: i32) -> i32 {
+            let mut host = WasmHostBridge;
+            let action: $crate::HookAction = $input_fn(&mut host, key, pressed != 0);
+            action as i32
+        }
+        $crate::cs16_wasm_exports!($($($rest)*)?);
     };
 }

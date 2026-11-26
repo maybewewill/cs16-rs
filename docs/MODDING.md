@@ -59,8 +59,8 @@ Minimal server mod using `cs-mod-sdk` (`#![forbid(unsafe_code)]`, `wasm32-unknow
 
 ```rust
 use cs_mod_sdk::{
-    CustomWeaponBuilder, HookAction, HookId, HookPhase, HostBridge, Player, cs_mod_init, vfx,
-    weapon_id,
+    CustomWeaponBuilder, HookAction, HookId, HookPhase, HostBridge, Player, cs_mod_hook,
+    cs_mod_init, vfx, weapon_id,
 };
 
 cs_mod_sdk::cs16_wasm_host_bridge!();
@@ -77,17 +77,20 @@ pub fn init_mod(host: &mut impl HostBridge) -> i32 {
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_hook(hook_id: i32, phase: i32) -> i32 {
-    let mut host = cs_mod_sdk::WasmHostBridge;
-    if HookId::from_i32(hook_id) == Some(HookId::PlayerSpawn) && phase == HookPhase::Post as i32 {
-        let p = Player::new(host.hook_arg_i32(0) as u8);
-        p.give_custom_weapon(&mut host, "golden_ak47");
-        if let Some(pos) = p.origin(&host) {
-            vfx::shockwave_ring(&mut host, pos, 180.0, [255, 200, 0, 220], 8, 12, None);
-        }
+#[cs_mod_hook(PlayerSpawn, post)]
+pub fn on_player_spawn(host: &mut impl HostBridge) -> HookAction {
+    let slot = host.hook_arg_i32(0).clamp(0, 31) as u8;
+    let p = Player::new(slot);
+    p.give_custom_weapon(host, "golden_ak47");
+    if let Some(pos) = p.origin(host) {
+        vfx::shockwave_ring(host, pos, 180.0, [255, 200, 0, 220], 8, 12, None);
     }
-    HookAction::Continue as i32
+    HookAction::Continue
+}
+
+cs_mod_sdk::cs16_wasm_exports! {
+    init: init_mod,
+    hooks: [(HookId::PlayerSpawn, HookPhase::Post) => on_player_spawn],
 }
 ```
 

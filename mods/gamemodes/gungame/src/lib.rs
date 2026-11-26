@@ -221,26 +221,8 @@ pub fn dispatch_timer(host: &mut impl HostBridge, cb_id: i32, arg: i32) -> HookA
     HookAction::Continue
 }
 
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_init() -> i32 {
-    let mut host = WasmHostBridge;
-    init_mod(&mut host)
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_hook(hook_id: i32, phase: i32) -> i32 {
-    let (Some(hook), Some(ph)) = (HookId::from_i32(hook_id), HookPhase::from_i32(phase)) else {
-        return HookAction::Continue as i32;
-    };
-    let mut host = WasmHostBridge;
-    dispatch_hook(&mut host, hook, ph) as i32
-}
-
-#[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_mod_timer(cb_id: i32, arg: i32) -> i32 {
-    let mut host = WasmHostBridge;
-    dispatch_timer(&mut host, cb_id, arg) as i32
+cs_mod_sdk::cs16_wasm_exports! {
+    init: init_mod,
+    hook: dispatch_hook,
+    timer: dispatch_timer,
 }
