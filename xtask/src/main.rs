@@ -11,6 +11,7 @@ const USAGE: &str = "usage: cargo xtask parity [--dir <path>] [--min <pct>]\n   
                      cargo xtask visual-diff [--map de_dust2] [--brightness <f32>] [--out target/visual-diff] [--reference-dir <dir>] [--resolution 1280x720] [--port 27099] [--ui none] [--build]\n       \
                      cargo xtask bench [--suite all|server|delta|client|gpu] [--gpu] [--ticks <n>] [--players <1..=32>] [--map <name>] [--gamedir <path>] [--stub] [--json]\n       \
                      cargo xtask web-build [--out <dir>] [--release]\n       \
+                     cargo xtask docs-build [--out <dir>]\n       \
                      cargo xtask mod new <id> --lang rust|cpp|go|py [--dir <parent>] [--name <title>] [--side server|client|both]\n       \
                      cargo xtask mod build [dir] [--out <dir>]\n       \
                      cargo xtask mod replay <dump.json> [--mod-path <override>] [--json]\n       \
@@ -47,6 +48,13 @@ fn main() -> ExitCode {
             }
         },
         Some("web-build") => match run_web_build(args) {
+            Ok(code) => code,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::from(2)
+            }
+        },
+        Some("docs-build") => match run_docs_build(args) {
             Ok(code) => code,
             Err(msg) => {
                 eprintln!("error: {msg}");
@@ -142,10 +150,37 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
         let dst = icons_dir.join(file);
         std::fs::copy(&src, &dst).map_err(|e| io_error(&src, &e))?;
     }
+    let subdir_files = xtask::mods_hub_gen::copy_web_subdirs(web_src, &out_dir)?;
+    if subdir_files > 0 {
+        println!(
+            "Copied {subdir_files} extra web subdirectory files (e.g. playground/) into {}",
+            out_dir.display()
+        );
+    }
+
+    let docs_stats = xtask::docs_gen::generate_docs_portal(&out_dir)?;
+    let mods_stats = xtask::mods_hub_gen::generate_mods_hub(&out_dir)?;
+    println!(
+        "Generated /docs/ ({} pages, {} hooks, {} API methods, {} CVars, {} AMXX natives, {} search entries) & /mods/ ({} plugins) in {}",
+        docs_stats.pages,
+        docs_stats.hooks,
+        docs_stats.api_methods,
+        docs_stats.cvars,
+        docs_stats.amxx_natives,
+        docs_stats.search_entries,
+        mods_stats.total_plugins,
+        out_dir.display(),
+    );
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut build_cmd = std::process::Command::new(cargo);
-    build_cmd.args(["build", "--target", "wasm32-unknown-unknown", "-p", "cs-web"]);
+    build_cmd.args([
+        "build",
+        "--target",
+        "wasm32-unknown-unknown",
+        "-p",
+        "cs-web",
+    ]);
     if release {
         build_cmd.arg("--release");
     }
@@ -161,7 +196,10 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
         .join(profile_dir)
         .join("cs-web.wasm");
     if !wasm_path.exists() {
-        return Err(format!("expected built wasm binary missing: {}", wasm_path.display()));
+        return Err(format!(
+            "expected built wasm binary missing: {}",
+            wasm_path.display()
+        ));
     }
 
     let bindgen = std::process::Command::new("wasm-bindgen")
@@ -192,6 +230,32 @@ fn run_web_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, Str
         }
         Err(e) => Err(format!("failed to invoke wasm-bindgen: {e}")),
     }
+}
+
+/// Generates only the static `/docs/` Developer Portal and `/mods/` Plugin Hub into `--out`.
+fn run_docs_build(mut args: impl Iterator<Item = String>) -> Result<ExitCode, String> {
+    let mut out_dir = PathBuf::from(DEFAULT_WEB_OUT);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => out_dir = args.next().ok_or("--out needs a value")?.into(),
+            other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
+        }
+    }
+    std::fs::create_dir_all(&out_dir).map_err(|e| io_error(&out_dir, &e))?;
+    let docs_stats = xtask::docs_gen::generate_docs_portal(&out_dir)?;
+    let mods_stats = xtask::mods_hub_gen::generate_mods_hub(&out_dir)?;
+    println!(
+        "Generated /docs/ ({} pages, {} hooks, {} API methods, {} CVars, {} AMXX natives, {} search entries) & /mods/ ({} plugins) in {}",
+        docs_stats.pages,
+        docs_stats.hooks,
+        docs_stats.api_methods,
+        docs_stats.cvars,
+        docs_stats.amxx_natives,
+        docs_stats.search_entries,
+        mods_stats.total_plugins,
+        out_dir.display(),
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Records a golden capture: runs `cs-probe` against `<ip:port>` for 30 s, walking, and writes
@@ -338,7 +402,8 @@ fn run_import_amxx(mut args: impl Iterator<Item = String>) -> Result<ExitCode, S
             }
         }
     }
-    let src = src.ok_or_else(|| format!("import-amxx requires <cstrike_or_amxmodx_dir>\n{USAGE}"))?;
+    let src =
+        src.ok_or_else(|| format!("import-amxx requires <cstrike_or_amxmodx_dir>\n{USAGE}"))?;
     let report = cs_mod_host::amxx_import::import_amxx_dir(&src, &out_dir)
         .map_err(|e| format!("AMXX migration failed: {e}"))?;
     print!("{}", report.summary());
