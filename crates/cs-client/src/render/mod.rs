@@ -180,6 +180,7 @@ pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    supported_present_modes: Vec<wgpu::PresentMode>,
     depth_view: wgpu::TextureView,
     msaa_samples: u32,
     msaa_color_view: Option<wgpu::TextureView>,
@@ -213,6 +214,30 @@ pub fn required_limits_for_adapter(adapter: &wgpu::Adapter) -> wgpu::Limits {
     } else {
         wgpu::Limits::default().using_resolution(adapter.limits())
     }
+}
+
+/// Selects the swapchain [`wgpu::PresentMode`] for `gl_vsync`:
+/// - `gl_vsync 0`: prefers `Immediate` -> `Mailbox` -> `Fifo` (sub-ms classic scanout)
+/// - `gl_vsync 1`: `Fifo`
+pub fn select_present_mode(
+    supported: &[wgpu::PresentMode],
+    vsync: bool,
+) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::Fifo
+    } else if supported.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
+/// Selects `SurfaceConfiguration::desired_maximum_frame_latency` for `gl_lowlatency`:
+/// `1` when enabled (`gl_lowlatency 1`), `2` when disabled (`gl_lowlatency 0`).
+pub fn desired_frame_latency(low_latency: bool) -> u32 {
+    if low_latency { 1 } else { 2 }
 }
 
 impl Renderer {
@@ -276,13 +301,8 @@ impl Renderer {
             .find(|f| !f.is_srgb())
             .ok_or_else(|| "surface reported no supported texture formats".to_string())?;
 
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        let supported_present_modes = caps.present_modes;
+        let present_mode = select_present_mode(&supported_present_modes, false);
 
         let surface_usage = if caps.usages.contains(wgpu::TextureUsages::COPY_DST) {
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST
@@ -299,7 +319,7 @@ impl Renderer {
             present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: desired_frame_latency(true),
         };
         surface.configure(&device, &config);
 
@@ -309,6 +329,7 @@ impl Renderer {
             device,
             queue,
             config,
+            supported_present_modes,
             adapter_info.name,
             backend_name,
         )
@@ -365,17 +386,20 @@ impl Renderer {
             device,
             queue,
             config,
+            vec![wgpu::PresentMode::Fifo],
             adapter_info.name,
             backend_name,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_init(
         surface: Option<wgpu::Surface<'static>>,
         offscreen_tex: Option<wgpu::Texture>,
         device: wgpu::Device,
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
+        supported_present_modes: Vec<wgpu::PresentMode>,
         adapter_name: String,
         backend_name: String,
     ) -> Result<Self, String> {
@@ -405,6 +429,7 @@ impl Renderer {
             device,
             queue,
             config,
+            supported_present_modes,
             depth_view,
             msaa_samples,
             msaa_color_view: None,
@@ -496,6 +521,31 @@ impl Renderer {
         }
     }
 
+    /// Dynamically reconfigures the swapchain whenever `gl_vsync` or `gl_lowlatency` changes
+    /// `PresentMode` or `desired_maximum_frame_latency`. Returns `true` when updated.
+    pub fn sync_swapchain_latency(&mut self, vsync: bool, low_latency: bool) -> bool {
+        let target_mode = select_present_mode(&self.supported_present_modes, vsync);
+        let target_latency = desired_frame_latency(low_latency);
+        if self.config.present_mode == target_mode
+            && self.config.desired_maximum_frame_latency == target_latency
+        {
+            return false;
+        }
+        self.config.present_mode = target_mode;
+        self.config.desired_maximum_frame_latency = target_latency;
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+            info!(
+                present_mode = ?target_mode,
+                desired_maximum_frame_latency = target_latency,
+                gl_vsync = u8::from(vsync),
+                gl_lowlatency = u8::from(low_latency),
+                "Reconfigured swapchain latency controls"
+            );
+        }
+        true
+    }
+
     pub fn load_map(&mut self, map: &BspMap, sky: &SkyboxTextures) {
         self.bsp.upload_map(&self.device, &self.queue, map);
         self.skybox.upload_skybox(&self.device, &self.queue, sky);
@@ -530,6 +580,12 @@ impl Renderer {
     /// `None` draws the world alone.
     pub fn set_entity_scene(&mut self, scene: Option<SceneFrame>) {
         self.entity_scene = scene;
+    }
+
+    /// Reclaims the previously installed [`SceneFrame`] after rendering so callers reusing
+    /// [`FrameView`](crate::view::FrameView) buffers preserve its `Vec` capacities across frames.
+    pub fn take_entity_scene(&mut self) -> Option<SceneFrame> {
+        self.entity_scene.take()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1445,6 +1501,36 @@ mod tests {
             gl_limits.max_texture_dimension_2d,
             cs_assets::bsp::LIGHTMAP_ATLAS_SIZE
         );
+    }
+
+    #[test]
+    fn swapchain_latency_selects_present_mode_and_frame_latency() {
+        use wgpu::PresentMode;
+
+        // `gl_vsync 0` prefers Immediate -> Mailbox -> Fifo.
+        assert_eq!(
+            select_present_mode(&[PresentMode::Fifo, PresentMode::Mailbox, PresentMode::Immediate], false),
+            PresentMode::Immediate
+        );
+        assert_eq!(
+            select_present_mode(&[PresentMode::Fifo, PresentMode::Mailbox], false),
+            PresentMode::Mailbox
+        );
+        assert_eq!(
+            select_present_mode(&[PresentMode::Fifo], false),
+            PresentMode::Fifo
+        );
+        assert_eq!(select_present_mode(&[], false), PresentMode::Fifo);
+
+        // `gl_vsync 1` always selects Fifo.
+        assert_eq!(
+            select_present_mode(&[PresentMode::Immediate, PresentMode::Mailbox, PresentMode::Fifo], true),
+            PresentMode::Fifo
+        );
+
+        // `gl_lowlatency 1` -> 1 frame max latency; `gl_lowlatency 0` -> 2.
+        assert_eq!(desired_frame_latency(true), 1);
+        assert_eq!(desired_frame_latency(false), 2);
     }
 
     /// Headless device for pipeline/shader validation; `None` when the machine has no adapter.

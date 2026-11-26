@@ -180,6 +180,8 @@ pub struct Cs16App {
     crosshair_last_weapon: u8,
     crosshair_last_clip: i32,
     prev_mouse_delta: (f32, f32),
+    pending_mouse_delta: (f64, f64),
+    frame_view: FrameView,
     weapon_switch_timer: f32,
     last_weapon: Option<u8>,
     mod_transfer: ClientModTransfer,
@@ -333,6 +335,8 @@ impl Cs16App {
             crosshair_last_weapon: 0,
             crosshair_last_clip: 0,
             prev_mouse_delta: (0.0, 0.0),
+            pending_mouse_delta: (0.0, 0.0),
+            frame_view: FrameView::default(),
             weapon_switch_timer: 0.0,
             last_weapon: None,
             mod_transfer: ClientModTransfer::default(),
@@ -500,6 +504,7 @@ impl Cs16App {
                     win.set_cursor_visible(true);
                     rt.cursor_captured = false;
                     self.input_state.clear();
+                    self.pending_mouse_delta = (0.0, 0.0);
                 }
             } else {
                 rt.cursor_captured = want;
@@ -755,6 +760,7 @@ impl Cs16App {
         self.overview_map_name.clear();
         self.scoreboard_toggled = false;
         self.input_state.clear();
+        self.pending_mouse_delta = (0.0, 0.0);
         self.pending_impulse = 0;
         self.cmd_clock = CmdClock::default();
         self.last_weapon = None;
@@ -800,25 +806,25 @@ impl Cs16App {
     }
 
     /// Plays what the client core queued: server/event sounds, ambient DSP, material bullet
-    /// impacts, radio/VOX sentences, reloads, and predicted footsteps.
-    fn play_sounds(&mut self, view: &FrameView, local_entity: Option<u16>, sess_now: f64) {
+    /// impacts, radio/VOX sentences, reloads, and predicted footsteps using the reused
+    /// `self.frame_view` (flat indexed `entity_positions`, zero `HashMap` hashing).
+    fn play_sounds_from_frame_view(&mut self, local_entity: Option<u16>, sess_now: f64) {
         let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
         let suit_vol = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
-        let listener_eye = view.eye;
+        let listener_eye = self.frame_view.eye;
         let coll = self.session.collision().cloned();
         let occ = |pos: Vec3| {
             coll.as_ref()
                 .is_some_and(|c| c.trace_world(listener_eye, pos, Hull::Point).fraction < 0.99)
         };
-        self.audio.update_listener(
+        self.audio.update_listener_indexed(
             ListenerState {
-                origin: view.eye,
-                right: view.listener_right,
+                origin: self.frame_view.eye,
+                right: self.frame_view.listener_right,
                 local_entity,
-                waterlevel: view.waterlevel,
+                waterlevel: self.frame_view.waterlevel,
             },
-            &view.entity_positions,
-            coll.as_ref().map(|_| &occ as &dyn Fn(Vec3) -> bool),
+            &self.frame_view.entity_positions,
         );
 
         let occ_ref = coll.as_ref().map(|_| &occ as &dyn Fn(Vec3) -> bool);
@@ -828,14 +834,14 @@ impl Cs16App {
             }
             self.audio.handle_sound_command(self.vfs.as_ref(), &cmd, occ_ref);
         }
-        for impact in &view.impact_sounds {
+        for impact in &self.frame_view.impact_sounds {
             self.audio.handle_sound_command(
                 self.vfs.as_ref(),
                 &SoundCommand::Start(impact.clone()),
                 occ_ref,
             );
         }
-        for (sender, code, pitch) in &view.radio_audio {
+        for (sender, code, pitch) in &self.frame_view.radio_audio {
             self.audio.play_send_audio_with_radar(
                 self.vfs.as_ref(),
                 code,
@@ -846,7 +852,7 @@ impl Cs16App {
                 &mut self.hud_anim.radio_flashes,
             );
         }
-        for (vol, kind) in &view.reload_sounds {
+        for (vol, kind) in &self.frame_view.reload_sounds {
             self.audio.play_reload_sound(self.vfs.as_ref(), *vol, *kind);
         }
         for s in self.session.take_predicted_sounds() {
@@ -855,7 +861,7 @@ impl Cs16App {
                     &s.sample,
                     local_entity.unwrap_or(1),
                     s.channel.clamp(0, 7) as u8,
-                    view.eye,
+                    self.frame_view.eye,
                     s.volume,
                     s.attenuation,
                     s.pitch.clamp(2, 255) as u8,
@@ -1940,6 +1946,89 @@ impl Cs16App {
         }
     }
 
+    /// Accumulates raw OS mouse counts for low-latency same-frame sampling before
+    /// `queue_usercmd` and camera matrix construction (matching GoldSrc `IN_MouseMove`).
+    fn accumulate_raw_mouse_delta(&mut self, dx: f64, dy: f64) {
+        if dx.is_finite() {
+            self.pending_mouse_delta.0 += dx;
+        }
+        if dy.is_finite() {
+            self.pending_mouse_delta.1 += dy;
+        }
+    }
+
+    /// Applies the frame's accumulated raw mouse delta to `self.camera` (and `+strafe`),
+    /// honoring `m_filter`, `m_customaccel*`, `zoom_sensitivity_ratio`, `m_yaw`/`m_pitch`,
+    /// and `cl_pitchup`/`cl_pitchdown`.
+    fn sample_accumulated_mouse_delta(&mut self) {
+        let (raw_x64, raw_y64) = std::mem::take(&mut self.pending_mouse_delta);
+        let raw_dx = raw_x64 as f32;
+        let raw_dy = raw_y64 as f32;
+        let m_filter = self.cvars.get_bool("m_filter");
+        let (fx, fy) = if m_filter {
+            let (px, py) = self.prev_mouse_delta;
+            ((raw_dx + px) * 0.5, (raw_dy + py) * 0.5)
+        } else {
+            (raw_dx, raw_dy)
+        };
+        self.prev_mouse_delta = (raw_dx, raw_dy);
+        if fx == 0.0 && fy == 0.0 {
+            return;
+        }
+        self.apply_processed_mouse_delta(fx, fy);
+    }
+
+    /// Flushes any raw mouse motion that arrived after `queue_usercmd` immediately before
+    /// camera matrix construction without double-applying `m_filter` on idle frames.
+    fn flush_late_mouse_delta(&mut self) {
+        if self.pending_mouse_delta.0 == 0.0 && self.pending_mouse_delta.1 == 0.0 {
+            return;
+        }
+        let (raw_x64, raw_y64) = std::mem::take(&mut self.pending_mouse_delta);
+        let raw_dx = raw_x64 as f32;
+        let raw_dy = raw_y64 as f32;
+        self.prev_mouse_delta.0 += raw_dx;
+        self.prev_mouse_delta.1 += raw_dy;
+        self.apply_processed_mouse_delta(raw_dx, raw_dy);
+    }
+
+    fn apply_processed_mouse_delta(&mut self, fx: f32, fy: f32) {
+        let m_yaw = self.cvars.get_f32("m_yaw");
+        let m_pitch = self.cvars.get_f32("m_pitch");
+        let (adj_x, adj_y, sens) = compute_mouse_move_params(
+            fx,
+            fy,
+            finite_or(self.cvars.get_f32("sensitivity"), 3.0).max(0.0),
+            self.mouse_sens_scale,
+            self.cvars.get_i32("m_customaccel"),
+            finite_or(self.cvars.get_f32("m_customaccel_scale"), 0.04).max(0.0),
+            finite_or(self.cvars.get_f32("m_customaccel_max"), 0.0).max(0.0),
+            finite_or(self.cvars.get_f32("m_customaccel_exponent"), 1.0),
+            m_yaw,
+            m_pitch,
+        );
+        let pitch_up = self.cvars.get_f32("cl_pitchup");
+        let pitch_down = self.cvars.get_f32("cl_pitchdown");
+        let strafe_mode = self.input_state.active_actions.contains("strafe")
+            || self.cvars.get_bool("lookstrafe");
+        let yaw_delta_x = if strafe_mode {
+            let m_side = finite_or(self.cvars.get_f32("m_side"), 0.8);
+            self.strafe_sidemove += adj_x * sens * m_side;
+            0.0
+        } else {
+            adj_x
+        };
+        self.camera.apply_mouse_delta_clamped(
+            yaw_delta_x,
+            adj_y,
+            sens,
+            m_yaw,
+            m_pitch,
+            pitch_up,
+            pitch_down,
+        );
+    }
+
     fn render_and_step(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
         let now = Instant::now();
         let raw_dt = (now - self.last_frame).as_secs_f32();
@@ -1957,7 +2046,8 @@ impl Cs16App {
         }
         self.sync_client_cvars_to_session(false);
 
-        // 1. Apply any pending server-forced view angles + keyboard turn/look, send usercmd, step.
+        // 1. Apply pending server-forced view angles, keyboard turn/look, and latest raw mouse
+        //    `dx/dy` immediately before `queue_usercmd` so this frame's motion hits same-frame!
         self.cvars.set_forward_unknown(self.session.is_active());
         self.apply_view_angle_updates();
         if self.wants_mouse_capture() {
@@ -1971,6 +2061,7 @@ impl Cs16App {
             };
             self.input_state
                 .apply_keyboard_angles(&mut self.camera, &klook_params);
+            self.sample_accumulated_mouse_delta();
         }
         self.queue_usercmd(f64::from(dt));
         let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
@@ -2142,8 +2233,8 @@ impl Cs16App {
         let default_fov = finite_or(self.cvars.get_f32("default_fov"), 90.0)
             .clamp(60.0, 120.0);
 
-        // 2. The frame of the session.
-        let mut view: Option<FrameView> = None;
+        // 2. The frame of the session (reusing `self.frame_view` via `build_view_into`).
+        let mut has_view = false;
         if in_game {
             if !self.audio_precache_warmed {
                 self.audio_precache_warmed = true;
@@ -2278,31 +2369,38 @@ impl Cs16App {
                 finite_or(self.camera.yaw_deg, 0.0),
                 0.0,
             );
-            if let Some((frame, registry)) = self.session.build_view(angles, &inputs) {
+            if let Some(registry) = self
+                .session
+                .build_view_into(&mut self.frame_view, angles, &inputs)
+            {
                 if let (Some(reg), Some(rt)) = (registry, &mut self.runtime) {
                     rt.renderer.set_model_registry(reg);
                 }
-                view = Some(frame);
+                has_view = true;
             }
             self.collect_hud_feeds(inputs.now);
             let hud_now = self.session.now();
-            let eye = view.as_ref().map_or(self.camera.position, |v| v.eye);
+            let eye = if has_view {
+                self.frame_view.eye
+            } else {
+                self.camera.position
+            };
             let yaw_deg = self.camera.yaw_deg;
             self.session.with_hud(|h| self.hud_anim.step_with_pose(dt, h, hud_now, eye, yaw_deg));
         }
         self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
         self.weapon_buckets.step(dt);
 
-        if let Some(v) = &view {
-            self.view_stats = v.stats;
-            if v.eye.is_finite() {
-                self.camera.position = v.eye;
+        if has_view {
+            self.view_stats = self.frame_view.stats;
+            if self.frame_view.eye.is_finite() {
+                self.camera.position = self.frame_view.eye;
             }
             let local_entity = self.session.local_slot().map(|s| u16::from(s) + 1);
             let sess_now_snd = self.session.now();
-            self.play_sounds(v, local_entity, sess_now_snd);
+            self.play_sounds_from_frame_view(local_entity, sess_now_snd);
             let master = finite_or(self.cvars.get_f32("volume"), 1.0).clamp(0.0, 1.0);
-            for path in &v.anim_sounds {
+            for path in &self.frame_view.anim_sounds {
                 self.audio.play_2d(self.vfs.as_ref(), path, 0.8 * master);
             }
         }
@@ -2454,11 +2552,16 @@ impl Cs16App {
             .with_hud(|h| h.server_name.clone())
             .unwrap_or_default();
         // Sniper scope overlay applies at <= 40 deg (AWP/Scout/auto-sniper), keeping AUG/SG552 (55 deg) unmasked.
-        let scoped = view
-            .as_ref()
-            .is_some_and(|v| v.fov.is_finite() && v.fov > 0.0 && v.fov <= 40.0);
-        let alive = view.as_ref().is_some_and(|v| v.alive);
-        let observer_mode = view.as_ref().map_or(0, |v| v.observer_mode);
+        let scoped = has_view
+            && self.frame_view.fov.is_finite()
+            && self.frame_view.fov > 0.0
+            && self.frame_view.fov <= 40.0;
+        let alive = has_view && self.frame_view.alive;
+        let observer_mode = if has_view {
+            self.frame_view.observer_mode
+        } else {
+            0
+        };
 
         let mod_hud_cmds = if in_game {
             let (hp, ap, money) = self
@@ -2512,7 +2615,8 @@ impl Cs16App {
             .with_hud(|h| (i32::from(h.health), h.hidden, h.timer_visible, h.night_vision))
             .unwrap_or((0, 0, false, false));
         let hud_vis = compute_hud_visibility(alive, hud_health, hud_hidden, hud_timer_vis);
-        if let Some(v) = &view {
+        if has_view {
+            let v = &self.frame_view;
             let (wid, wflags, on_ground, ducking, ch_spd, clip) = self.session.local_crosshair_state();
             if !paused && hud_vis.crosshair && !scoped && should_draw_dynamic_crosshair(v.fov, wid) {
                 if wid != self.crosshair_last_weapon {
@@ -2651,9 +2755,8 @@ impl Cs16App {
             let show_spec_bars = self.cvars.get_bool("spec_hud_bars")
                 && (self.session.is_demo() || show_spec_gui);
             if in_game && !modal_menu_open && (show_spec_gui || show_spec_bars) {
-                let empty_weapons = std::collections::BTreeMap::new();
-                let player_weapons = view.as_ref().map_or(&empty_weapons, |v| &v.player_weapons);
-                let observed_target = view.as_ref().map_or(0, |v| v.observed_target);
+                let player_weapons = &v.player_weapons;
+                let observed_target = v.observed_target;
                 let sidebar_players: Vec<SpecSidebarPlayer> = if show_spec_bars {
                     self.session
                         .with_hud(|h| {
@@ -2965,97 +3068,118 @@ impl Cs16App {
             self.audio.play_ui_sound(self.vfs.as_ref(), ui_snd.vfs_path());
         }
 
-        // 4. The 3D frame.
+        // 4. The 3D frame: flush any late mouse motion before camera matrix build and sync
+        //    swapchain latency controls (`gl_vsync` / `gl_lowlatency`).
+        if self.wants_mouse_capture() {
+            self.flush_late_mouse_delta();
+        }
+        let gl_vsync = self.cvars.get_bool("gl_vsync");
+        let gl_lowlatency = self.cvars.get_bool("gl_lowlatency");
+        let scene_for_frame = has_view.then(|| self.frame_view.take_scene());
+        let Some(rt) = &mut self.runtime else {
+            if let Some(prev_scene) = scene_for_frame {
+                self.frame_view.restore_scene(prev_scene);
+            }
+            return false;
+        };
+        rt.renderer.sync_swapchain_latency(gl_vsync, gl_lowlatency);
+        rt.renderer.set_entity_scene(scene_for_frame);
+
         let mut render_cam = self.camera.clone();
         let mut fov = default_fov;
-        let mut viewmodel_inst: Option<(String, glam::Mat4, i32, i32, f32, bool)> = None;
-        let mut beams = Vec::new();
-        let mut points = Vec::new();
-        let mut decals = Vec::new();
-        let mut custom_decals = std::collections::HashMap::new();
-        let mut lightstyles = [1.0f32; 64];
-        let mut lights = GpuLightsUniform::default();
-        let mut elights = Vec::new();
+        let mut viewmodel_inst: Option<(&str, glam::Mat4, i32, i32, f32, bool)> = None;
+        let default_lightstyles = [1.0f32; 64];
         let mut fog = None;
-        let mut scene = None;
         let mut sensitivity_scale = 1.0;
-        if let Some(v) = view {
-            let punch_x = finite_or(v.punch.x, 0.0);
-            let punch_y = finite_or(v.punch.y, 0.0);
-            let punch_z = finite_or(v.punch.z, 0.0);
-            let v_idlescale = finite_or(self.cvars.get_f32("v_idlescale"), 0.0);
-            let idle = calc_view_idle(time_sec, v_idlescale);
-            render_cam.position.z += finite_or(v.bob, 0.0) + finite_or(v.shake_z, 0.0);
-            render_cam.pitch_deg =
-                (finite_or(render_cam.pitch_deg, 0.0) + punch_x + finite_or(v.shake_angles.x, 0.0) + idle.pitch)
-                    .clamp(-89.0, 89.0);
-            render_cam.yaw_deg =
-                (finite_or(render_cam.yaw_deg, 0.0) + punch_y + finite_or(v.shake_angles.y, 0.0) + idle.yaw)
-                    .rem_euclid(360.0);
-            render_cam.roll_deg =
-                (punch_z + finite_or(v.roll_deg, 0.0) + finite_or(v.shake_angles.z, 0.0) + idle.roll)
-                    .clamp(-90.0, 90.0);
-            let base_fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
-            fov = (base_fov + finite_or(v.underwater_fov_delta, 0.0)).clamp(10.0, 120.0);
-            let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
-            sensitivity_scale = compute_zoom_sens_scale(base_fov, default_fov, zoom_ratio);
-            if let Some(vm) = &v.viewmodel {
-                let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
-                let b = finite_or(v.bob, 0.0);
-                let fov_z = if (fov - 90.0).abs() < 0.5 || (fov - 110.0).abs() < 0.5 {
-                    1.0
-                } else if (fov - 100.0).abs() < 0.5 {
-                    2.0
-                } else if (fov - 80.0).abs() < 0.5 {
-                    0.5
-                } else {
-                    0.0
-                };
-                // `client.dll` `0x1006b52f..1006b7a0`: project `bob * 0.4` along full 3D view forward.
-                let (view_fwd, _, _) = cs_client::render::scene::angle_vectors(Vec3::new(
-                    render_cam.pitch_deg,
-                    render_cam.yaw_deg,
-                    render_cam.roll_deg,
-                ));
-                let vm_eye = eye
-                    + Vec3::new(0.0, 0.0, b - 1.0 + fov_z)
-                    + view_fwd * (b * 0.4)
-                    + v.viewmodel_lag;
-                let (vm_yaw, vm_pitch, vm_roll) = calc_viewmodel_angles(
-                    render_cam.yaw_deg,
-                    render_cam.pitch_deg,
-                    render_cam.roll_deg,
-                    b,
-                    idle,
-                );
-                let xf = viewmodel_transform_with_angles(
-                    vm_eye,
-                    vm_yaw,
-                    vm_pitch,
-                    vm_roll,
-                    Vec3::ZERO,
-                    vm.right_hand,
-                );
-                viewmodel_inst = Some((
-                    vm.path.clone(),
-                    xf,
-                    vm.sequence,
-                    vm.body,
-                    vm.animtime,
-                    vm.right_hand,
-                ));
-            }
-            beams = v.beams;
-            points = v.points;
-            decals = v.decals;
-            custom_decals = v.custom_decals;
-            lightstyles = v.lightstyles;
-            lights = v.lights;
-            elights = v.elights;
-            fog = if self.cvars.get_bool("gl_fog") { v.fog } else { None };
-            scene = Some(v.scene);
-        }
-        rt.renderer.set_entity_scene(scene);
+        let (beams_slice, points_slice, decals_slice, custom_decals_opt, lightstyles_ref, lights, elights_slice) =
+            if has_view {
+                let v = &self.frame_view;
+                let punch_x = finite_or(v.punch.x, 0.0);
+                let punch_y = finite_or(v.punch.y, 0.0);
+                let punch_z = finite_or(v.punch.z, 0.0);
+                let v_idlescale = finite_or(self.cvars.get_f32("v_idlescale"), 0.0);
+                let idle = calc_view_idle(time_sec, v_idlescale);
+                render_cam.position.z += finite_or(v.bob, 0.0) + finite_or(v.shake_z, 0.0);
+                render_cam.pitch_deg =
+                    (finite_or(render_cam.pitch_deg, 0.0) + punch_x + finite_or(v.shake_angles.x, 0.0) + idle.pitch)
+                        .clamp(-89.0, 89.0);
+                render_cam.yaw_deg =
+                    (finite_or(render_cam.yaw_deg, 0.0) + punch_y + finite_or(v.shake_angles.y, 0.0) + idle.yaw)
+                        .rem_euclid(360.0);
+                render_cam.roll_deg =
+                    (punch_z + finite_or(v.roll_deg, 0.0) + finite_or(v.shake_angles.z, 0.0) + idle.roll)
+                        .clamp(-90.0, 90.0);
+                let base_fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
+                fov = (base_fov + finite_or(v.underwater_fov_delta, 0.0)).clamp(10.0, 120.0);
+                let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
+                sensitivity_scale = compute_zoom_sens_scale(base_fov, default_fov, zoom_ratio);
+                if let Some(vm) = &v.viewmodel {
+                    let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
+                    let b = finite_or(v.bob, 0.0);
+                    let fov_z = if (fov - 90.0).abs() < 0.5 || (fov - 110.0).abs() < 0.5 {
+                        1.0
+                    } else if (fov - 100.0).abs() < 0.5 {
+                        2.0
+                    } else if (fov - 80.0).abs() < 0.5 {
+                        0.5
+                    } else {
+                        0.0
+                    };
+                    // `client.dll` `0x1006b52f..1006b7a0`: project `bob * 0.4` along full 3D view forward.
+                    let (view_fwd, _, _) = cs_client::render::scene::angle_vectors(Vec3::new(
+                        render_cam.pitch_deg,
+                        render_cam.yaw_deg,
+                        render_cam.roll_deg,
+                    ));
+                    let vm_eye = eye
+                        + Vec3::new(0.0, 0.0, b - 1.0 + fov_z)
+                        + view_fwd * (b * 0.4)
+                        + v.viewmodel_lag;
+                    let (vm_yaw, vm_pitch, vm_roll) = calc_viewmodel_angles(
+                        render_cam.yaw_deg,
+                        render_cam.pitch_deg,
+                        render_cam.roll_deg,
+                        b,
+                        idle,
+                    );
+                    let xf = viewmodel_transform_with_angles(
+                        vm_eye,
+                        vm_yaw,
+                        vm_pitch,
+                        vm_roll,
+                        Vec3::ZERO,
+                        vm.right_hand,
+                    );
+                    viewmodel_inst = Some((
+                        vm.path.as_str(),
+                        xf,
+                        vm.sequence,
+                        vm.body,
+                        vm.animtime,
+                        vm.right_hand,
+                    ));
+                }
+                fog = if self.cvars.get_bool("gl_fog") { v.fog } else { None };
+                (
+                    v.beams.as_slice(),
+                    v.points.as_slice(),
+                    v.decals.as_slice(),
+                    Some(&v.custom_decals),
+                    &v.lightstyles,
+                    v.lights,
+                    v.elights.as_slice(),
+                )
+            } else {
+                (
+                    &[][..],
+                    &[][..],
+                    &[][..],
+                    None,
+                    &default_lightstyles,
+                    GpuLightsUniform::default(),
+                    &[][..],
+                )
+            };
         self.mouse_sens_scale = sensitivity_scale;
 
         let debug_mode = if self.cvars.get_bool("r_lightmap") || self.cvars.get_bool("r_lightmap_only")
@@ -3094,18 +3218,18 @@ impl Cs16App {
             time_sec,
             fog,
         };
-        let vm_ref = viewmodel_inst.as_ref().map(|(path, xf, seq, body, started, right_hand)| {
+        let vm_ref = viewmodel_inst.map(|(path, xf, seq, body, started, right_hand)| {
             StudioInstance {
-                model_path: path.as_str(),
-                transform: *xf,
-                sequence: *seq,
+                model_path: path,
+                transform: xf,
+                sequence: seq,
                 frame: 0.0,
-                animtime: *started,
+                animtime: started,
                 framerate: 1.0,
                 now: sess_now as f32,
-                body: *body,
+                body,
                 light_rgb: Vec3::splat(0.95),
-                flip_winding: *right_hand,
+                flip_winding: right_hand,
                 attached_model: None,
                 ..StudioInstance::default()
             }
@@ -3113,13 +3237,13 @@ impl Cs16App {
         let scene_data = SceneDynamicData {
             vfs: self.vfs.as_ref(),
             viewmodel: vm_ref,
-            beams: &beams,
-            points: &points,
-            decals: &decals,
-            custom_decals: Some(&custom_decals),
-            lightstyles: &lightstyles,
+            beams: beams_slice,
+            points: points_slice,
+            decals: decals_slice,
+            custom_decals: custom_decals_opt,
+            lightstyles: lightstyles_ref,
             lights,
-            elights: &elights,
+            elights: elights_slice,
         };
 
         self.frame_count += 1;
@@ -3145,7 +3269,7 @@ impl Cs16App {
             self.pending_screenshot.take()
         };
 
-        if let Some(stats) = rt.renderer.render_frame(
+        let render_result = rt.renderer.render_frame(
             &render_cam,
             &settings,
             &scene_data,
@@ -3153,7 +3277,11 @@ impl Cs16App {
             &paint_jobs,
             full_output.pixels_per_point,
             capture_path.as_deref(),
-        ) {
+        );
+        if let Some(prev_scene) = rt.renderer.take_entity_scene() {
+            self.frame_view.restore_scene(prev_scene);
+        }
+        if let Some(stats) = render_result {
             self.last_stats = stats;
             if auto_capture_now && self.exit_after_screenshot {
                 if let Some(el) = event_loop {
@@ -3382,7 +3510,11 @@ impl ApplicationHandler for Cs16App {
             ));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        let renderer = Renderer::new(Arc::clone(&window));
+        let mut renderer = Renderer::new(Arc::clone(&window));
+        renderer.sync_swapchain_latency(
+            self.cvars.get_bool("gl_vsync"),
+            self.cvars.get_bool("gl_lowlatency"),
+        );
         let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -3439,6 +3571,7 @@ impl ApplicationHandler for Cs16App {
                     rt.cursor_captured = false;
                 }
                 self.input_state.clear();
+                self.pending_mouse_delta = (0.0, 0.0);
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(rt) = &mut self.runtime {
@@ -3502,50 +3635,7 @@ impl ApplicationHandler for Cs16App {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
             && self.wants_mouse_capture()
         {
-            let raw_dx = dx as f32;
-            let raw_dy = dy as f32;
-            let (fx, fy) = if self.cvars.get_bool("m_filter") {
-                let (px, py) = self.prev_mouse_delta;
-                ((raw_dx + px) * 0.5, (raw_dy + py) * 0.5)
-            } else {
-                (raw_dx, raw_dy)
-            };
-            self.prev_mouse_delta = (raw_dx, raw_dy);
-
-            let m_yaw = self.cvars.get_f32("m_yaw");
-            let m_pitch = self.cvars.get_f32("m_pitch");
-            let (adj_x, adj_y, sens) = compute_mouse_move_params(
-                fx,
-                fy,
-                finite_or(self.cvars.get_f32("sensitivity"), 3.0).max(0.0),
-                self.mouse_sens_scale,
-                self.cvars.get_i32("m_customaccel"),
-                finite_or(self.cvars.get_f32("m_customaccel_scale"), 0.04).max(0.0),
-                finite_or(self.cvars.get_f32("m_customaccel_max"), 0.0).max(0.0),
-                finite_or(self.cvars.get_f32("m_customaccel_exponent"), 1.0),
-                m_yaw,
-                m_pitch,
-            );
-            let pitch_up = self.cvars.get_f32("cl_pitchup");
-            let pitch_down = self.cvars.get_f32("cl_pitchdown");
-            let strafe_mode = self.input_state.active_actions.contains("strafe")
-                || self.cvars.get_bool("lookstrafe");
-            let yaw_delta_x = if strafe_mode {
-                let m_side = finite_or(self.cvars.get_f32("m_side"), 0.8);
-                self.strafe_sidemove += adj_x * sens * m_side;
-                0.0
-            } else {
-                adj_x
-            };
-            self.camera.apply_mouse_delta_clamped(
-                yaw_delta_x,
-                adj_y,
-                sens,
-                m_yaw,
-                m_pitch,
-                pitch_up,
-                pitch_down,
-            );
+            self.accumulate_raw_mouse_delta(dx, dy);
         }
     }
 }
@@ -3987,5 +4077,42 @@ mod tests {
         assert!(should_use_100hz_cmd_grid(144.0, true, true, true, 16));
         assert!(should_use_100hz_cmd_grid(240.0, true, true, true, 16));
         assert!(should_use_100hz_cmd_grid(0.0, true, true, true, 16));
+    }
+
+    #[test]
+    fn raw_mouse_accumulation_samples_same_frame_and_supports_m_filter() {
+        let mut app = Cs16App::new(LaunchConfig::default());
+        app.cvars.set("sensitivity", "2.0");
+        app.cvars.set("m_yaw", "0.022");
+        app.cvars.set("m_pitch", "0.022");
+        app.cvars.set("m_filter", "0");
+        app.camera.yaw_deg = 100.0;
+        app.camera.pitch_deg = 0.0;
+
+        // Multiple high-polling-rate USB packets accumulate cleanly into one frame sample.
+        app.accumulate_raw_mouse_delta(3.0, -1.0);
+        app.accumulate_raw_mouse_delta(7.0, 5.0);
+        app.sample_accumulated_mouse_delta();
+        let expected_yaw = 100.0 - 10.0 * 2.0 * 0.022;
+        let expected_pitch = 4.0 * 2.0 * 0.022;
+        assert!((app.camera.yaw_deg - expected_yaw).abs() < 1e-4);
+        assert!((app.camera.pitch_deg - expected_pitch).abs() < 1e-4);
+        assert_eq!(app.pending_mouse_delta, (0.0, 0.0));
+
+        // Late mouse motion arriving before camera matrix build flushes on the same frame.
+        app.accumulate_raw_mouse_delta(5.0, 0.0);
+        app.flush_late_mouse_delta();
+        assert!((app.camera.yaw_deg - (expected_yaw - 5.0 * 2.0 * 0.022)).abs() < 1e-4);
+
+        // `m_filter 1` averages current frame delta with previous frame delta.
+        app.cvars.set("m_filter", "1");
+        app.prev_mouse_delta = (0.0, 0.0);
+        app.camera.yaw_deg = 100.0;
+        app.accumulate_raw_mouse_delta(10.0, 0.0);
+        app.sample_accumulated_mouse_delta();
+        assert!((app.camera.yaw_deg - (100.0 - 5.0 * 2.0 * 0.022)).abs() < 1e-4);
+        // Idle frame decays the second half of `m_filter`.
+        app.sample_accumulated_mouse_delta();
+        assert!((app.camera.yaw_deg - (100.0 - 10.0 * 2.0 * 0.022)).abs() < 1e-4);
     }
 }

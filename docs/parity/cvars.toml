@@ -1386,7 +1386,7 @@ evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, 
 [[item]]
 id = "gl_lowlatency"
 status = "tested"
-evidence = "crates/cs-client/src/ui/options.rs::tests::mouse_tab_low_latency_binds_to_gl_lowlatency_not_m_customaccel"
+evidence = "crates/cs-client/src/ui/options.rs::tests::mouse_tab_low_latency_binds_to_gl_lowlatency_not_m_customaccel, crates/cs-client/src/render/mod.rs::tests::swapchain_latency_selects_present_mode_and_frame_latency"
 
 [[item]]
 id = "gl_lowlatency_debugoutput"
@@ -1451,7 +1451,7 @@ evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, 
 [[item]]
 id = "gl_vsync"
 status = "tested"
-evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-cvar/src/{defaults.rs, lib.rs}"
+evidence = "xtask/tests/registry_sync.rs::every_registered_cvar_is_in_registry, every_cvars_toml_entry_is_registered_as_cvar_or_command; crates/cs-client/src/render/mod.rs::tests::swapchain_latency_selects_present_mode_and_frame_latency; crates/cs-cvar/src/{defaults.rs, lib.rs}"
 
 [[item]]
 id = "gl_wateramp"

@@ -57,6 +57,17 @@ use crate::view_effects::{
 /// effect sprites); the server's table ends well below (`MAX_MODELS` is 512).
 pub const CLIENT_MODEL_BASE: u16 = 1024;
 
+/// Default flat `entity_positions` capacity matching GoldSrc's edict table ceiling.
+pub const DEFAULT_MAX_EDICTS: usize = 1024;
+
+/// ReHLDS / GoldSrc edict table formula (`900 + 15 * (max_clients - 1)`), floored at
+/// [`DEFAULT_MAX_EDICTS`] and capped at `2048`.
+#[inline]
+fn goldsrc_max_edicts(max_clients: u8) -> usize {
+    let clients = usize::from(max_clients.max(1));
+    (900 + 15 * (clients - 1)).clamp(DEFAULT_MAX_EDICTS, 2048)
+}
+
 /// A tracer or beam lives this long when the message gives no time of its own.
 const TRACER_LIFE: f64 = 0.12;
 /// Beams and glows kept at once.
@@ -231,7 +242,8 @@ pub struct FrameView {
     pub anim_sounds: Vec<String>,
     pub listener_right: Vec3,
     pub waterlevel: u8,
-    pub entity_positions: HashMap<u16, Vec3>,
+    /// Flat `entity_index -> Option<Vec3>` position table sized to `max_edicts` (`O(1)` lookup, zero hashing).
+    pub entity_positions: Vec<Option<Vec3>>,
     pub impact_sounds: Vec<SoundStart>,
     pub radio_audio: Vec<(u8, String, u8)>,
     pub reload_sounds: Vec<(u8, u8)>,
@@ -245,6 +257,94 @@ pub struct FrameView {
     /// Active weapon short names per 1-based player entity index (`p_*.mdl` -> e.g. `"ak47"`).
     pub player_weapons: BTreeMap<u8, String>,
     pub stats: ViewStats,
+}
+
+fn empty_scene_frame() -> SceneFrame {
+    SceneFrame {
+        time: 0.0,
+        view: ViewBasis::from_angles(Vec3::ZERO, Vec3::ZERO),
+        entities: Vec::new(),
+        shadows: Vec::new(),
+    }
+}
+
+impl Default for FrameView {
+    fn default() -> Self {
+        Self {
+            scene: empty_scene_frame(),
+            eye: Vec3::ZERO,
+            punch: Vec3::ZERO,
+            fov: 90.0,
+            bob: 0.0,
+            roll_deg: 0.0,
+            shake_angles: Vec3::ZERO,
+            shake_z: 0.0,
+            viewmodel_lag: Vec3::ZERO,
+            underwater_tint: None,
+            underwater_fov_delta: 0.0,
+            viewmodel: None,
+            beams: Vec::new(),
+            points: Vec::new(),
+            lights: GpuLightsUniform::default(),
+            elights: Vec::new(),
+            decals: Vec::new(),
+            lightstyles: [1.0; 64],
+            fog: None,
+            anim_sounds: Vec::new(),
+            listener_right: Vec3::Y,
+            waterlevel: 0,
+            entity_positions: Vec::new(),
+            impact_sounds: Vec::new(),
+            radio_audio: Vec::new(),
+            reload_sounds: Vec::new(),
+            custom_decals: HashMap::new(),
+            alive: false,
+            observer_mode: 0,
+            observed_target: 0,
+            is_demo: false,
+            player_weapons: BTreeMap::new(),
+            stats: ViewStats::default(),
+        }
+    }
+}
+
+impl FrameView {
+    /// `O(1)` lookup of an entity's world position for this frame (zero hashing).
+    #[inline]
+    pub fn entity_position(&self, entity: u16) -> Option<Vec3> {
+        self.entity_positions
+            .get(usize::from(entity))
+            .copied()
+            .flatten()
+    }
+
+    /// Moves `self.scene` out for submission to [`Renderer::set_entity_scene`](crate::render::Renderer::set_entity_scene)
+    /// without allocating a replacement buffer. Pair with [`Self::restore_scene`] after rendering
+    /// so `entities` / `shadows` `Vec` capacities persist across frames.
+    pub fn take_scene(&mut self) -> SceneFrame {
+        std::mem::replace(&mut self.scene, empty_scene_frame())
+    }
+
+    /// Reinstalls a previously taken [`SceneFrame`] so its `Vec` capacities are reused next frame.
+    pub fn restore_scene(&mut self, scene: SceneFrame) {
+        self.scene = scene;
+    }
+
+    /// Clears per-frame vectors while preserving heap allocations for zero-alloc reuse.
+    fn clear_for_reuse(&mut self) {
+        self.scene.entities.clear();
+        self.scene.shadows.clear();
+        self.beams.clear();
+        self.points.clear();
+        self.elights.clear();
+        self.decals.clear();
+        self.anim_sounds.clear();
+        self.entity_positions.fill(None);
+        self.impact_sounds.clear();
+        self.radio_audio.clear();
+        self.reload_sounds.clear();
+        self.stats = ViewStats::default();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +408,208 @@ pub struct ViewBuilder {
     anim: Option<ViewAnimState>,
     last_weaponanim: i32,
     last_viewmodel: i32,
+    // Persistent scratch buffers reused across frames (zero steady-state heap allocations).
+    spotlights_scratch: Vec<SpotLight>,
+    shadow_origins_scratch: Vec<Vec3>,
+    player_model_handles: [Option<ModelHandle>; 32],
+    player_model_extra: Vec<(u8, ModelHandle)>,
+    player_model_path_buf: String,
+    vm_path_scratch: String,
+    vm_key_scratch: String,
+    pmodel_short_cache: HashMap<ModelHandle, Option<String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewCvarSnapshot {
+    cl_minmodels: bool,
+    cl_min_ct: i32,
+    cl_min_t: i32,
+    cl_shadows: bool,
+    spec_xray: bool,
+}
+
+impl Default for ViewCvarSnapshot {
+    fn default() -> Self {
+        Self {
+            cl_minmodels: false,
+            cl_min_ct: 2,
+            cl_min_t: 1,
+            cl_shadows: true,
+            spec_xray: false,
+        }
+    }
+}
+
+impl ViewCvarSnapshot {
+    fn from_cvars(cvars: Option<&ClientCvars>) -> Self {
+        match cvars {
+            Some(c) => Self {
+                cl_minmodels: c.float("cl_minmodels") != 0.0,
+                cl_min_ct: c.float("cl_min_ct") as i32,
+                cl_min_t: c.float("cl_min_t") as i32,
+                cl_shadows: c.float("cl_shadows") != 0.0,
+                spec_xray: c.float("spec_xray") != 0.0,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClientDataSnapshot {
+    origin: Vec3,
+    view_ofs: Vec3,
+    velocity: Vec3,
+    punchangle: Vec3,
+    fov: f32,
+    weaponanim: i32,
+    viewmodel: i32,
+    alive: bool,
+    observer_mode: i32,
+    observed_target: u8,
+}
+
+impl ClientDataSnapshot {
+    fn from_cd(cd: &cs_proto48::delta::GoldSrcClientData) -> Self {
+        Self {
+            origin: cd.origin,
+            view_ofs: cd.view_ofs,
+            velocity: cd.velocity,
+            punchangle: cd.punchangle,
+            fov: cd.fov,
+            weaponanim: cd.weaponanim,
+            viewmodel: cd.viewmodel,
+            alive: is_client_alive(cd),
+            observer_mode: cd.iuser1,
+            observed_target: u8::try_from(cd.iuser2.max(0)).unwrap_or(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PredictionSnapshot {
+    predicted: bool,
+    simorg: Vec3,
+    viewheight: Vec3,
+    simvel: Vec3,
+    punchangle: Vec3,
+    onground: i32,
+    watertype: i32,
+    waterlevel: i32,
+    effects: i32,
+    weapon_fov: f32,
+    weapon_anim: i32,
+    weapon_viewmodel: i32,
+    standing_on: Option<u16>,
+}
+
+impl PredictionSnapshot {
+    fn from_prediction(p: &Prediction) -> Self {
+        Self {
+            predicted: p.predicted,
+            simorg: p.simorg,
+            viewheight: p.viewheight,
+            simvel: p.simvel,
+            punchangle: p.punchangle,
+            onground: p.onground,
+            watertype: p.watertype,
+            waterlevel: p.waterlevel,
+            effects: p.effects,
+            weapon_fov: p.weapon.fov,
+            weapon_anim: p.weapon.weaponanim,
+            weapon_viewmodel: p.weapon.viewmodel,
+            standing_on: p.standing_on(),
+        }
+    }
+}
+
+/// Zero-alloc lookup for `\key\value` pairs in a GoldSrc info string (`InfoString::parse` parity).
+fn info_value<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+    let trimmed = raw.strip_prefix('\\').unwrap_or(raw);
+    let mut parts = trimmed.split('\\');
+    while let Some(k) = parts.next() {
+        if k.is_empty() {
+            break;
+        }
+        let v = parts.next().unwrap_or("");
+        if k.eq_ignore_ascii_case(key) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn register_client_model_slot(client_models: &mut Vec<String>, path: &str) -> Option<usize> {
+    if let Some(slot) = client_models.iter().position(|p| p == path) {
+        return Some(slot);
+    }
+    if client_models.len() >= 256 {
+        return None;
+    }
+    client_models.push(path.to_string());
+    Some(client_models.len() - 1)
+}
+
+fn resolve_eye_and_vm(
+    cd: Option<ClientDataSnapshot>,
+    prediction: Option<PredictionSnapshot>,
+) -> (Vec3, Vec3, f32, bool, i32, i32, i32) {
+    match cd {
+        Some(cd) => {
+            let alive = cd.alive;
+            let observer_mode = cd.observer_mode;
+            let (pred_eye, pred_punch, pred_fov, pred_anim, pred_vm) = match prediction {
+                Some(p) if p.predicted && alive && observer_mode == 0 => (
+                    p.simorg + p.viewheight,
+                    p.punchangle,
+                    if p.weapon_fov > 0.0 {
+                        p.weapon_fov
+                    } else {
+                        cd.fov
+                    },
+                    p.weapon_anim,
+                    if p.weapon_viewmodel > 0 {
+                        p.weapon_viewmodel
+                    } else {
+                        cd.viewmodel
+                    },
+                ),
+                Some(p) if p.predicted => (
+                    p.simorg + p.viewheight,
+                    p.punchangle,
+                    cd.fov,
+                    cd.weaponanim,
+                    cd.viewmodel,
+                ),
+                _ => (
+                    cd.origin + cd.view_ofs,
+                    cd.punchangle,
+                    cd.fov,
+                    cd.weaponanim,
+                    cd.viewmodel,
+                ),
+            };
+            (
+                pred_eye,
+                pred_punch,
+                pred_fov,
+                alive,
+                observer_mode,
+                pred_anim,
+                pred_vm,
+            )
+        }
+        None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
+    }
+}
+
+fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
 impl Default for ViewBuilder {
@@ -487,6 +789,14 @@ impl ViewBuilder {
             anim: None,
             last_weaponanim: -1,
             last_viewmodel: -1,
+            spotlights_scratch: Vec::new(),
+            shadow_origins_scratch: Vec::new(),
+            player_model_handles: [None; 32],
+            player_model_extra: Vec::new(),
+            player_model_path_buf: String::new(),
+            vm_path_scratch: String::new(),
+            vm_key_scratch: String::new(),
+            pmodel_short_cache: HashMap::new(),
         }
     }
 
@@ -539,6 +849,7 @@ impl ViewBuilder {
         self.last_vm_path.clear();
         self.last_vm_animtime = -1.0;
         self.models_key = 0;
+        self.pmodel_short_cache.clear();
     }
 
     /// The submodel bounds of the loaded map, for the translucent sort centres.
@@ -575,6 +886,7 @@ impl ViewBuilder {
         let mut registry = ModelRegistry::from_precache(&names);
         registry.set_brush_bounds(&self.brush_bounds);
         self.models = registry;
+        self.pmodel_short_cache.clear();
         *self.names.borrow_mut() = precache
             .models
             .iter()
@@ -597,18 +909,212 @@ impl ViewBuilder {
     /// `model`, the shells): a slot past the server's table. `None` the first time; the
     /// registry is rebuilt at the start of the next frame.
     fn client_handle(&mut self, path: &str) -> Option<ModelHandle> {
-        let slot = match self.client_models.iter().position(|p| p == path) {
-            Some(slot) => slot,
-            None => {
-                if self.client_models.len() >= 256 {
-                    return None;
-                }
-                self.client_models.push(path.to_string());
-                self.client_models.len() - 1
-            }
-        };
+        let slot = register_client_model_slot(&mut self.client_models, path)?;
         self.models
             .resolve(i32::from(CLIENT_MODEL_BASE) + slot as i32)
+    }
+
+    fn player_model_handle(&self, slot: u8) -> Option<ModelHandle> {
+        let idx = usize::from(slot);
+        if idx < self.player_model_handles.len() {
+            self.player_model_handles[idx]
+        } else {
+            self.player_model_extra
+                .iter()
+                .find(|&&(s, _)| s == slot)
+                .map(|&(_, h)| h)
+        }
+    }
+
+    /// Resolves per-player studio models from userinfo `model` and `cl_minmodels` into
+    /// `self.player_model_handles` with zero steady-state allocations.
+    fn resolve_player_model_handles(
+        &mut self,
+        userinfos: &BTreeMap<u8, String>,
+        players: &BTreeMap<u8, cs_clientcore::hud::PlayerScore>,
+        cvars: ViewCvarSnapshot,
+        precache: &PrecacheTables,
+    ) -> bool {
+        let mut registry_changed = self.ensure_registry(precache);
+        let prev_client_models = self.client_models.len();
+
+        // Pass 1: register any newly seen userinfo / minmodel paths.
+        for raw in userinfos.values() {
+            if let Some(m) = info_value(raw, "model")
+                && !m.is_empty()
+                && m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                self.player_model_path_buf.clear();
+                self.player_model_path_buf.push_str("models/player/");
+                self.player_model_path_buf.push_str(m);
+                self.player_model_path_buf.push('/');
+                self.player_model_path_buf.push_str(m);
+                self.player_model_path_buf.push_str(".mdl");
+                let _ = register_client_model_slot(
+                    &mut self.client_models,
+                    &self.player_model_path_buf,
+                );
+            }
+        }
+        if cvars.cl_minmodels {
+            for score in players.values() {
+                if let Some(path) = resolve_minmodel_path(
+                    &score.team,
+                    score.team_id,
+                    score.attrib,
+                    cvars.cl_min_ct,
+                    cvars.cl_min_t,
+                ) {
+                    let _ = register_client_model_slot(&mut self.client_models, path);
+                }
+            }
+        }
+        if self.client_models.len() != prev_client_models && self.ensure_registry(precache) {
+            registry_changed = true;
+        }
+
+        // Pass 2: resolve slot -> ModelHandle into fixed inline array (0 allocs).
+        self.player_model_handles = [None; 32];
+        self.player_model_extra.clear();
+        for (&slot, raw) in userinfos {
+            if let Some(m) = info_value(raw, "model")
+                && !m.is_empty()
+                && m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                self.player_model_path_buf.clear();
+                self.player_model_path_buf.push_str("models/player/");
+                self.player_model_path_buf.push_str(m);
+                self.player_model_path_buf.push('/');
+                self.player_model_path_buf.push_str(m);
+                self.player_model_path_buf.push_str(".mdl");
+                if let Some(cm_slot) = self
+                    .client_models
+                    .iter()
+                    .position(|p| p == &self.player_model_path_buf)
+                    && let Some(h) = self
+                        .models
+                        .resolve(i32::from(CLIENT_MODEL_BASE) + cm_slot as i32)
+                {
+                    let idx = usize::from(slot);
+                    if idx < self.player_model_handles.len() {
+                        self.player_model_handles[idx] = Some(h);
+                    } else {
+                        self.player_model_extra.push((slot, h));
+                    }
+                }
+            }
+        }
+        if cvars.cl_minmodels {
+            for (&player_id, score) in players {
+                if let Some(slot0) = player_id.checked_sub(1)
+                    && let Some(path) = resolve_minmodel_path(
+                        &score.team,
+                        score.team_id,
+                        score.attrib,
+                        cvars.cl_min_ct,
+                        cvars.cl_min_t,
+                    )
+                    && let Some(cm_slot) = self.client_models.iter().position(|p| p == path)
+                    && let Some(h) = self
+                        .models
+                        .resolve(i32::from(CLIENT_MODEL_BASE) + cm_slot as i32)
+                {
+                    let idx = usize::from(slot0);
+                    if idx < self.player_model_handles.len() {
+                        self.player_model_handles[idx] = Some(h);
+                    } else if let Some(entry) =
+                        self.player_model_extra.iter_mut().find(|(s, _)| *s == slot0)
+                    {
+                        entry.1 = h;
+                    } else {
+                        self.player_model_extra.push((slot0, h));
+                    }
+                }
+            }
+        }
+        registry_changed
+    }
+
+    fn capture_vm_path(&mut self, precache: &PrecacheTables, viewmodel_index: i32) {
+        self.vm_path_scratch.clear();
+        if let Ok(idx) = u16::try_from(viewmodel_index)
+            && let Some(path) = precache.model(idx)
+        {
+            self.vm_path_scratch.push_str(path);
+        }
+    }
+
+    /// Takes the frame of connection `conn` at session time `inputs.now`, reusing `out`'s
+    /// internal `Vec` buffers across frames (`0` steady-state heap allocations per frame).
+    ///
+    /// Returns the registry too when it changed, so the renderer can install it.
+    pub fn build_into<T: PacketTransport>(
+        &mut self,
+        out: &mut FrameView,
+        conn: &mut Connection<T>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+    ) -> Option<ModelRegistry> {
+        let now = inputs.now;
+        conn.frames_mut().advance(inputs.frametime.clamp(0.0, 0.25));
+        let weapon_state = {
+            let p = conn.predictor().prediction();
+            p.weapon
+                .weapons
+                .get(&(p.weapon.weapon_id.clamp(0, 255) as u8))
+                .map_or(0, |w| w.m_i_weapon_state)
+        };
+        let (max_smokepuffs, fastsprites, cvar_snap) = {
+            let cv = conn.cvars();
+            (
+                cv.float("max_smokepuffs").max(0.0) as usize,
+                cv.float("fastsprites").clamp(0.0, 2.0) as u8,
+                ViewCvarSnapshot::from_cvars(Some(cv)),
+            )
+        };
+        conn.fx_mut().set_smoke_cvars(max_smokepuffs, fastsprites);
+        conn.set_fx_local(weapon_state, false, inputs.right_hand);
+        let fired = conn.update_effects(now);
+        let cd_snap = conn.client_data().map(ClientDataSnapshot::from_cd);
+        let slot = conn.player_slot();
+        let pred_snap = PredictionSnapshot::from_prediction(conn.predictor().prediction());
+        let max_edicts =
+            goldsrc_max_edicts(conn.server_info().map_or(32, |info| info.max_clients));
+        let (_, _, _, _, _, _, viewmodel_index) = resolve_eye_and_vm(cd_snap, Some(pred_snap));
+
+        let mut registry_changed = self.resolve_player_model_handles(
+            conn.userinfos(),
+            &conn.fx().hud.players,
+            cvar_snap,
+            conn.precache(),
+        );
+        self.capture_vm_path(conn.precache(), viewmodel_index);
+
+        let emitted = conn.frames_mut().emit(&EmitInputs {
+            simorg: pred_snap
+                .predicted
+                .then_some(pred_snap.simorg)
+                .or_else(|| cd_snap.map(|c| c.origin)),
+            standing_on: pred_snap.standing_on,
+        });
+        let added_tempent_model = self.build_parts_into_inner(
+            out,
+            conn.fx_mut(),
+            cd_snap,
+            slot,
+            Some(pred_snap),
+            &emitted,
+            &fired,
+            view_angles,
+            inputs,
+            cvar_snap,
+            false,
+            max_edicts,
+        );
+        if added_tempent_model && self.ensure_registry(conn.precache()) {
+            registry_changed = true;
+        }
+        registry_changed.then(|| self.models.clone())
     }
 
     /// Takes the frame of connection `conn` at session time `inputs.now`: advances the client
@@ -621,49 +1127,55 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
-        let now = inputs.now;
-        conn.frames_mut().advance(inputs.frametime.clamp(0.0, 0.25));
-        let weapon_state = {
-            let p = conn.predictor().prediction();
-            p.weapon
-                .weapons
-                .get(&(p.weapon.weapon_id.clamp(0, 255) as u8))
-                .map_or(0, |w| w.m_i_weapon_state)
-        };
-        let cvars = conn.cvars().clone();
-        conn.fx_mut().set_smoke_cvars(
-            cvars.float("max_smokepuffs").max(0.0) as usize,
-            cvars.float("fastsprites").clamp(0.0, 2.0) as u8,
+        let mut out = FrameView::default();
+        let reg = self.build_into(&mut out, conn, view_angles, inputs);
+        (out, reg)
+    }
+
+    /// Builds a [`FrameView`] from a [`DemoPlayer`] session frame into `out` for buffer reuse.
+    pub fn build_demo_into(
+        &mut self,
+        out: &mut FrameView,
+        player: &mut DemoPlayer,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+    ) -> Option<ModelRegistry> {
+        let cd_snap = player.client_data().map(ClientDataSnapshot::from_cd);
+        let slot = player.server_info().map(|i| i.player_slot);
+        let max_edicts =
+            goldsrc_max_edicts(player.server_info().map_or(32, |info| info.max_clients));
+        let (_, _, _, _, _, _, viewmodel_index) = resolve_eye_and_vm(cd_snap, None);
+        let cvar_snap = ViewCvarSnapshot::default();
+        let mut registry_changed = self.resolve_player_model_handles(
+            player.userinfos(),
+            &player.hud().players,
+            cvar_snap,
+            player.precache(),
         );
-        conn.set_fx_local(weapon_state, false, inputs.right_hand);
-        let fired = conn.update_effects(now);
-        let cd = conn.client_data().cloned();
-        let slot = conn.player_slot();
-        let prediction = conn.predictor().prediction().clone();
-        let userinfos = conn.userinfos().clone();
-        let precache = conn.precache().clone();
-        let emitted = conn.frames_mut().emit(&EmitInputs {
-            simorg: prediction
-                .predicted
-                .then_some(prediction.simorg)
-                .or_else(|| cd.as_ref().map(|c| c.origin)),
-            standing_on: prediction.standing_on(),
+        self.capture_vm_path(player.precache(), viewmodel_index);
+        let emitted = player.frames_mut().emit(&EmitInputs {
+            simorg: cd_snap.map(|c| c.origin),
+            standing_on: None,
         });
-        let fx = conn.fx_mut();
-        self.build_parts_with_is_demo(
-            &precache,
-            fx,
-            &userinfos,
-            cd,
+        let added_tempent_model = self.build_parts_into_inner(
+            out,
+            player.fx_mut(),
+            cd_snap,
             slot,
-            Some(&prediction),
-            emitted,
-            fired,
+            None,
+            &emitted,
+            &fired,
             view_angles,
             inputs,
-            Some(&cvars),
-            false,
-        )
+            cvar_snap,
+            true,
+            max_edicts,
+        );
+        if added_tempent_model && self.ensure_registry(player.precache()) {
+            registry_changed = true;
+        }
+        registry_changed.then(|| self.models.clone())
     }
 
     /// Builds a [`FrameView`] from a [`DemoPlayer`] session frame.
@@ -674,29 +1186,9 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
-        let cd = player.client_data().cloned();
-        let slot = player.server_info().map(|i| i.player_slot);
-        let userinfos = player.userinfos().clone();
-        let precache = player.precache().clone();
-        let emitted = player.frames_mut().emit(&EmitInputs {
-            simorg: cd.as_ref().map(|c| c.origin),
-            standing_on: None,
-        });
-        let fx = player.fx_mut();
-        self.build_parts_with_is_demo(
-            &precache,
-            fx,
-            &userinfos,
-            cd,
-            slot,
-            None,
-            emitted,
-            fired,
-            view_angles,
-            inputs,
-            None,
-            true,
-        )
+        let mut out = FrameView::default();
+        let reg = self.build_demo_into(&mut out, player, fired, view_angles, inputs);
+        (out, reg)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -713,7 +1205,42 @@ impl ViewBuilder {
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> (FrameView, Option<ModelRegistry>) {
-        self.build_parts_with_is_demo(
+        let mut out = FrameView::default();
+        let reg = self.build_parts_with_is_demo_into(
+            &mut out,
+            precache,
+            fx,
+            userinfos,
+            cd,
+            slot,
+            prediction,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+            None,
+            false,
+        );
+        (out, reg)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_parts_into(
+        &mut self,
+        out: &mut FrameView,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+    ) -> Option<ModelRegistry> {
+        self.build_parts_with_is_demo_into(
+            out,
             precache,
             fx,
             userinfos,
@@ -744,7 +1271,9 @@ impl ViewBuilder {
         inputs: &ViewInputs,
         cvars: Option<&ClientCvars>,
     ) -> (FrameView, Option<ModelRegistry>) {
-        self.build_parts_with_is_demo(
+        let mut out = FrameView::default();
+        let reg = self.build_parts_with_is_demo_into(
+            &mut out,
             precache,
             fx,
             userinfos,
@@ -757,7 +1286,8 @@ impl ViewBuilder {
             inputs,
             cvars,
             false,
-        )
+        );
+        (out, reg)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -776,57 +1306,90 @@ impl ViewBuilder {
         cvars: Option<&ClientCvars>,
         is_demo: bool,
     ) -> (FrameView, Option<ModelRegistry>) {
+        let mut out = FrameView::default();
+        let reg = self.build_parts_with_is_demo_into(
+            &mut out,
+            precache,
+            fx,
+            userinfos,
+            cd,
+            slot,
+            prediction,
+            emitted,
+            fired,
+            view_angles,
+            inputs,
+            cvars,
+            is_demo,
+        );
+        (out, reg)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_parts_with_is_demo_into(
+        &mut self,
+        out: &mut FrameView,
+        precache: &PrecacheTables,
+        fx: &mut ClientEffects,
+        userinfos: &BTreeMap<u8, String>,
+        cd: Option<cs_proto48::delta::GoldSrcClientData>,
+        slot: Option<u8>,
+        prediction: Option<&Prediction>,
+        emitted: cs_clientcore::interp::EmitResult,
+        fired: Vec<FiredEvent>,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+        cvars: Option<&ClientCvars>,
+        is_demo: bool,
+    ) -> Option<ModelRegistry> {
+        let cd_snap = cd.as_ref().map(ClientDataSnapshot::from_cd);
+        let pred_snap = prediction.map(PredictionSnapshot::from_prediction);
+        let cvar_snap = ViewCvarSnapshot::from_cvars(cvars);
+        let (_, _, _, _, _, _, viewmodel_index) = resolve_eye_and_vm(cd_snap, pred_snap);
+        let mut registry_changed =
+            self.resolve_player_model_handles(userinfos, &fx.hud.players, cvar_snap, precache);
+        self.capture_vm_path(precache, viewmodel_index);
+        let added_tempent_model = self.build_parts_into_inner(
+            out,
+            fx,
+            cd_snap,
+            slot,
+            pred_snap,
+            &emitted,
+            &fired,
+            view_angles,
+            inputs,
+            cvar_snap,
+            is_demo,
+            DEFAULT_MAX_EDICTS,
+        );
+        if added_tempent_model && self.ensure_registry(precache) {
+            registry_changed = true;
+        }
+        registry_changed.then(|| self.models.clone())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_parts_into_inner(
+        &mut self,
+        out: &mut FrameView,
+        fx: &mut ClientEffects,
+        cd: Option<ClientDataSnapshot>,
+        slot: Option<u8>,
+        prediction: Option<PredictionSnapshot>,
+        emitted: &cs_clientcore::interp::EmitResult,
+        fired: &[FiredEvent],
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+        cvars: ViewCvarSnapshot,
+        is_demo: bool,
+        max_edicts: usize,
+    ) -> bool {
+        out.clear_for_reuse();
         let now = inputs.now;
-        let mut registry_changed = self.ensure_registry(precache);
         let local_number = slot.map(|s| u16::from(s) + 1);
         let (mut eye, mut punch, mut fov, alive, observer_mode, weaponanim, viewmodel_index) =
-            match &cd {
-                Some(cd) => {
-                    let alive = is_client_alive(cd);
-                    let observer_mode = cd.iuser1;
-                    let (pred_eye, pred_punch, pred_fov, pred_anim, pred_vm) = match prediction {
-                        Some(p) if p.predicted && alive && observer_mode == 0 => (
-                            p.simorg + p.viewheight,
-                            p.punchangle,
-                            if p.weapon.fov > 0.0 {
-                                p.weapon.fov
-                            } else {
-                                cd.fov
-                            },
-                            p.weapon.weaponanim,
-                            if p.weapon.viewmodel > 0 {
-                                p.weapon.viewmodel
-                            } else {
-                                cd.viewmodel
-                            },
-                        ),
-                        Some(p) if p.predicted => (
-                            p.simorg + p.viewheight,
-                            p.punchangle,
-                            cd.fov,
-                            cd.weaponanim,
-                            cd.viewmodel,
-                        ),
-                        _ => (
-                            cd.origin + cd.view_ofs,
-                            cd.punchangle,
-                            cd.fov,
-                            cd.weaponanim,
-                            cd.viewmodel,
-                        ),
-                    };
-                    (
-                        pred_eye,
-                        pred_punch,
-                        pred_fov,
-                        alive,
-                        observer_mode,
-                        pred_anim,
-                        pred_vm,
-                    )
-                }
-                None => (Vec3::ZERO, Vec3::ZERO, 0.0, false, 0, 0, 0),
-            };
+            resolve_eye_and_vm(cd, prediction);
         if !eye.is_finite() {
             eye = Vec3::ZERO;
         }
@@ -847,60 +1410,16 @@ impl ViewBuilder {
             fov = fallback_fov;
         }
 
-        // A player is drawn with the model its userinfo names (`model`): `models/player.mdl` is
-        // only the entity's placeholder. When `cl_minmodels` is non-zero, override remote player
-        // models by `TeamInfo` / VIP `ScoreAttrib` and `cl_min_ct` / `cl_min_t`.
-        let mut player_models: BTreeMap<u8, String> = userinfos
-            .iter()
-            .filter_map(|(slot, raw)| {
-                let info = cs_proto48::info::InfoString::parse(raw);
-                let m = info.get("model")?;
-                (!m.is_empty() && m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
-                    .then(|| (*slot, format!("models/player/{m}/{m}.mdl")))
-            })
-            .collect();
-        let cl_minmodels = cvars.is_some_and(|c| c.float("cl_minmodels") != 0.0);
-        if cl_minmodels {
-            let min_ct = cvars.map_or(2, |c| c.float("cl_min_ct") as i32);
-            let min_t = cvars.map_or(1, |c| c.float("cl_min_t") as i32);
-            for (&player_id, score) in &fx.hud.players {
-                if let Some(slot0) = player_id.checked_sub(1)
-                    && let Some(path) = resolve_minmodel_path(
-                        &score.team,
-                        score.team_id,
-                        score.attrib,
-                        min_ct,
-                        min_t,
-                    )
-                {
-                    player_models.insert(slot0, path.to_string());
-                }
-            }
-        }
-        // Register player/minmodel overrides and rebuild the registry before `render_entity`
-        // so changes to `cl_minmodels` or userinfo `model` take effect on the current frame.
-        for path in player_models.values() {
-            let _ = self.client_handle(path);
-        }
-        if self.ensure_registry(precache) {
-            registry_changed = true;
-        }
-
         let time = now as f32;
-        let mut scene = SceneFrame {
-            time,
-            view: ViewBasis::from_angles(eye, view_angles + punch),
-            entities: Vec::new(),
-            shadows: Vec::new(),
-        };
-        let mut stats = ViewStats::default();
+        out.scene.time = time;
+        out.scene.view = ViewBasis::from_angles(eye, view_angles + punch);
 
         let dt = inputs.frametime.clamp(0.0, 0.25) as f32;
         self.dlights.step(now, dt);
         self.particles.step(now, dt);
 
         // Local player flashlight spotlight (`impulse 100` -> Flashlight HUD/prediction).
-        let mut spotlights: Vec<SpotLight> = Vec::new();
+        self.spotlights_scratch.clear();
         let pred_effects = prediction.map_or(0, |p| p.effects);
         if alive && (fx.hud.flashlight_on || (pred_effects as u32 & ef::DIMLIGHT) != 0) {
             let (fwd, _, _) = crate::render::scene::angle_vectors(view_angles + punch);
@@ -910,18 +1429,15 @@ impl ViewBuilder {
                 self.collision.as_deref(),
                 now,
             );
-            spotlights.push(spot);
+            self.spotlights_scratch.push(spot);
             if let Some(b) = bounce {
                 self.dlights.add_light(b);
             }
         }
 
-        let mut shadow_origins: Vec<Vec3> = Vec::new();
-        let mut player_weapons: BTreeMap<u8, String> = BTreeMap::new();
-        let observed_target = cd
-            .as_ref()
-            .map_or(0, |c| u8::try_from(c.iuser2.max(0)).unwrap_or(0));
-        let xray_enabled = inputs.spec_xray || cvars.is_some_and(|c| c.float("spec_xray") != 0.0);
+        self.shadow_origins_scratch.clear();
+        let observed_target = cd.map_or(0, |c| c.observed_target);
+        let xray_enabled = inputs.spec_xray || cvars.spec_xray;
         let xray_policy = evaluate_spec_xray_policy(
             xray_enabled,
             is_demo,
@@ -930,20 +1446,43 @@ impl ViewBuilder {
             local_number,
             fx,
         );
-        // Entity loop: build RenderEntities + collect entity EF_* lights & world positions.
-        let mut entity_positions: HashMap<u16, Vec3> = HashMap::with_capacity(emitted.entities.len());
+
+        // Ensure flat entity position table covers `max_edicts` and every active entity index (`O(1)`).
+        let max_ent = emitted
+            .entities
+            .iter()
+            .map(|e| usize::from(e.number) + 1)
+            .max()
+            .unwrap_or(0);
+        let target_edicts = max_ent.max(max_edicts);
+        if out.entity_positions.len() < target_edicts {
+            out.entity_positions.resize(target_edicts, None);
+        }
+
+        // Entity loop: build RenderEntities + collect entity EF_* lights & flat world positions.
+        let mut seen_weapon_players: u32 = 0;
         for e in &emitted.entities {
-            entity_positions.insert(e.number, e.origin);
+            out.entity_positions[usize::from(e.number)] = Some(e.origin);
             if e.kind == EntityKind::Player
                 && let Some(pid) = u8::try_from(e.number).ok().filter(|&n| (1..=32).contains(&n))
                 && e.state.weaponmodel != 0
-                && let Some(wname) = self
-                    .models
-                    .resolve(i32::from(e.state.weaponmodel))
-                    .and_then(|h| self.models.get(h))
-                    .and_then(|m| weapon_short_from_pmodel(&m.name))
+                && let Some(h) = self.models.resolve(i32::from(e.state.weaponmodel))
             {
-                player_weapons.insert(pid, wname);
+                let models = &self.models;
+                let short = self.pmodel_short_cache.entry(h).or_insert_with(|| {
+                    models.get(h).and_then(|m| weapon_short_from_pmodel(&m.name))
+                });
+                if let Some(wname) = short.as_deref() {
+                    seen_weapon_players |= 1u32 << (pid - 1);
+                    if let Some(existing) = out.player_weapons.get_mut(&pid) {
+                        if existing != wname {
+                            existing.clear();
+                            existing.push_str(wname);
+                        }
+                    } else {
+                        out.player_weapons.insert(pid, wname.to_string());
+                    }
+                }
             }
             if e.kind == EntityKind::Beam {
                 self.push_beam_entity(e, now);
@@ -973,7 +1512,7 @@ impl ViewBuilder {
                         self.collision.as_deref(),
                         now,
                     );
-                    spotlights.push(spot);
+                    self.spotlights_scratch.push(spot);
                     if let Some(b) = bounce {
                         self.dlights.add_light(b);
                     }
@@ -1018,13 +1557,13 @@ impl ViewBuilder {
                     &cs_clientcore::tempents::ParticleEffect::Flicker { position: e.origin },
                 );
             }
-            if let Some(mut r) = self.render_entity(e, &player_models, dt, time) {
+            if let Some(mut r) = self.render_entity(e, dt, time) {
                 match e.model {
-                    CoreModelKind::Brush => stats.brush += 1,
+                    CoreModelKind::Brush => out.stats.brush += 1,
                     CoreModelKind::Studio => {
-                        stats.studio += 1;
+                        out.stats.studio += 1;
                         if is_shadow_eligible(e, &r, &self.models, &fx.hud.players) {
-                            shadow_origins.push(e.origin);
+                            self.shadow_origins_scratch.push(e.origin);
                         }
                         if r.player
                             && r.renderfx != RENDERFX_DEAD_PLAYER
@@ -1041,40 +1580,44 @@ impl ViewBuilder {
                             };
                         }
                     }
-                    CoreModelKind::Sprite => stats.sprites += 1,
+                    CoreModelKind::Sprite => out.stats.sprites += 1,
                 }
-                scene.entities.push(r);
+                out.scene.entities.push(r);
             }
         }
-        stats.entities = scene.entities.len();
+        if seen_weapon_players == 0 {
+            out.player_weapons.clear();
+        } else {
+            out.player_weapons
+                .retain(|&pid, _| (1..=32).contains(&pid) && (seen_weapon_players & (1u32 << (pid - 1))) != 0);
+        }
+        out.stats.entities = out.scene.entities.len();
 
-        // Temp entities: shells, sprites, gibs.
-        let temps: Vec<TempEnt> = fx.tempents.render_list().cloned().collect();
-        for t in &temps {
-            if let Some(r) = self.render_tempent(t, scene.entities.len() as u16) {
-                stats.tempents += 1;
-                scene.entities.push(r);
+        // Temp entities: shells, sprites, gibs (zero TempEnt cloning!).
+        let prev_client_models = self.client_models.len();
+        for t in fx.tempents.render_list() {
+            if let Some(r) = self.render_tempent(t, out.scene.entities.len() as u16) {
+                out.stats.tempents += 1;
+                out.scene.entities.push(r);
             }
         }
-        if self.ensure_registry(precache) {
-            registry_changed = true;
-        }
-        let cl_shadows = cvars.is_none_or(|c| c.float("cl_shadows") != 0.0);
-        if cl_shadows
-            && !shadow_origins.is_empty()
+        let added_tempent_client_model = self.client_models.len() != prev_client_models;
+        if cvars.cl_shadows
+            && !self.shadow_origins_scratch.is_empty()
             && let Some(world) = self.collision.as_deref()
         {
-            let solid_colliders = collect_solid_brush_colliders(&scene.entities, &self.models);
-            for origin in shadow_origins {
+            let solid_colliders = collect_solid_brush_colliders(&out.scene.entities, &self.models);
+            for &origin in &self.shadow_origins_scratch {
                 if let Some(sh) = trace_studio_shadow(world, &solid_colliders, origin, 18.0) {
-                    scene.shadows.push(sh);
+                    out.scene.shadows.push(sh);
                 }
             }
         }
-        self.apply_glow_occlusion(&mut scene);
+        self.apply_glow_occlusion(&mut out.scene);
 
-        // Effects that are not entries of the pool.
-        let pos_lookup = |id: u16| entity_positions.get(&id).copied();
+        // Effects that are not entries of the pool (O(1) flat position lookup).
+        let positions = &out.entity_positions;
+        let pos_lookup = |id: u16| positions.get(usize::from(id)).copied().flatten();
         for effect in fx.tempents.take_effects() {
             self.take_effect(effect, now, &pos_lookup);
         }
@@ -1090,66 +1633,53 @@ impl ViewBuilder {
 
         let prev_vm_anim = self.anim;
         let show_client_impacts = inputs.sv_cheats && matches!(inputs.sv_showimpacts, 1 | 2);
-        let impact_sounds = self.collect_bullet_impacts(&fired, &scene.entities, now, show_client_impacts);
-        self.update_view_anim(fx, &fired, weaponanim, viewmodel_index, time);
-        let viewmodel = self.viewmodel(precache, alive, fov, viewmodel_index, inputs);
-        let mut anim_sounds = Vec::new();
-        if let Some(ref vm) = viewmodel {
-            let events = self.sample_viewmodel_events(vm, prev_vm_anim, time);
-            for (ev_id, opts) in events {
-                match ev_id {
-                    5001 | 5011 | 5021 | 5031 => {
-                        let (fwd, _, _) = crate::render::scene::angle_vectors(view_angles + punch);
-                        self.dlights.add_light(DynamicLight {
-                            key: 9999,
-                            entity_light: false,
-                            origin: eye + fwd * 26.0,
-                            radius: 180.0,
-                            color: [255, 195, 95],
-                            die: now + 0.05,
-                            decay: 1800.0,
-                        });
-                    }
-                    5004 if !opts.is_empty() => anim_sounds.push(opts),
-                    _ => {}
-                }
-            }
+        self.collect_bullet_impacts_into(
+            fired,
+            &out.scene.entities,
+            now,
+            show_client_impacts,
+            &mut out.impact_sounds,
+        );
+        self.update_view_anim(fx, fired, weaponanim, viewmodel_index, time);
+        self.populate_viewmodel_into(&mut out.viewmodel, alive, fov, viewmodel_index, inputs);
+        if let Some(ref vm) = out.viewmodel {
+            self.sample_viewmodel_events_into(
+                vm,
+                prev_vm_anim,
+                time,
+                now,
+                eye,
+                view_angles + punch,
+                &mut out.anim_sounds,
+            );
         }
 
-        let mut beams: Vec<FxBeam> = self
-            .beams
-            .iter()
-            .map(|b| FxBeam {
-                start: b.start,
-                end: b.end,
-                width: b.width,
-                color: b.color,
+        out.beams.extend(self.beams.iter().map(|b| FxBeam {
+            start: b.start,
+            end: b.end,
+            width: b.width,
+            color: b.color,
+            additive: true,
+        }));
+        self.beam_sys.emit_fx(now, &mut out.beams);
+        out.points.extend(self.glows.iter().map(|g| {
+            let fade = ((g.die - now) / 0.25).clamp(0.0, 1.0) as f32;
+            FxPoint {
+                origin: g.origin,
+                size: g.size,
+                color: [g.color[0], g.color[1], g.color[2], g.color[3] * fade],
                 additive: true,
-            })
-            .collect();
-        self.beam_sys.emit_fx(now, &mut beams);
-        let mut points: Vec<FxPoint> = self
-            .glows
-            .iter()
-            .map(|g| {
-                let fade = ((g.die - now) / 0.25).clamp(0.0, 1.0) as f32;
-                FxPoint {
-                    origin: g.origin,
-                    size: g.size,
-                    color: [g.color[0], g.color[1], g.color[2], g.color[3] * fade],
-                    additive: true,
-                }
-            })
-            .collect();
-        self.particles.emit_fx(now, &mut beams, &mut points);
+            }
+        }));
+        self.particles.emit_fx(now, &mut out.beams, &mut out.points);
         if inputs.sv_cheats && inputs.sv_showhitboxes {
-            self.emit_client_hitboxes(&scene.entities, &mut beams, time);
+            self.emit_client_hitboxes(&out.scene.entities, &mut out.beams, time);
         }
-        stats.beams = beams.len();
+        out.stats.beams = out.beams.len();
 
         let simvel = prediction
             .map(|p| p.simvel)
-            .or_else(|| cd.as_ref().map(|c| c.velocity))
+            .or_else(|| cd.map(|c| c.velocity))
             .unwrap_or(Vec3::ZERO);
         let onground = prediction.is_none_or(|p| p.onground >= 0);
         let watertype = prediction.map_or(0, |p| p.watertype);
@@ -1171,19 +1701,28 @@ impl ViewBuilder {
             inputs.cl_rollangle,
             inputs.cl_rollspeed,
         );
-        let (shake_angles, shake_z) =
-            calc_screen_shake(fx.hud.screen_shake.as_ref(), now);
+        let (shake_angles, shake_z) = calc_screen_shake(fx.hud.screen_shake.as_ref(), now);
         let viewmodel_lag =
             self.lag_state
-                .update(scene.view.forward, dt, inputs.cl_viewmodel_lag);
-        let (underwater_tint, underwater_fov_delta) = underwater_tint_and_fov(
-            watertype,
-            waterlevel,
-            time,
-        );
+                .update(out.scene.view.forward, dt, inputs.cl_viewmodel_lag);
+        let (underwater_tint, underwater_fov_delta) =
+            underwater_tint_and_fov(watertype, waterlevel, time);
 
-        let lightstyles = evaluate_lightstyles(&fx.hud.lightstyles, time);
-        let fog = fx.hud.fog.map(|f| {
+        out.eye = eye;
+        out.punch = punch;
+        out.fov = fov;
+        out.bob = bob;
+        out.roll_deg = roll_deg;
+        out.shake_angles = shake_angles;
+        out.shake_z = shake_z;
+        out.viewmodel_lag = viewmodel_lag;
+        out.underwater_tint = underwater_tint;
+        out.underwater_fov_delta = underwater_fov_delta;
+        out.lights = self.dlights.pack_uniform(eye, &self.spotlights_scratch);
+        out.elights.extend_from_slice(&self.dlights.elights);
+        out.decals.append(&mut self.pending_decals);
+        out.lightstyles = evaluate_lightstyles(&fx.hud.lightstyles, time);
+        out.fog = fx.hud.fog.map(|f| {
             (
                 [
                     f32::from(f.color[0]) / 255.0,
@@ -1193,59 +1732,29 @@ impl ViewBuilder {
                 f.density,
             )
         });
-        let lights = self.dlights.pack_uniform(eye, &spotlights);
-        let elights = self.dlights.elights.clone();
-        let decals = std::mem::take(&mut self.pending_decals);
-        let custom_decals = fx.hud.custom_decals.clone();
-        let radio_audio: Vec<(u8, String, u8)> = fx
-            .hud
-            .audio
-            .drain(..)
-            .map(|(sender, code, pitch)| (sender, code, pitch.clamp(0, 255) as u8))
-            .collect();
-        let reload_sounds: Vec<(u8, u8)> = fx.hud.reload_sounds.drain(..).collect();
-        let listener_right = scene.view.right;
+        out.listener_right = out.scene.view.right;
+        out.waterlevel = waterlevel;
+        out.radio_audio.extend(
+            fx.hud
+                .audio
+                .drain(..)
+                .map(|(sender, code, pitch)| (sender, code, pitch.clamp(0, 255) as u8)),
+        );
+        out.reload_sounds.extend(fx.hud.reload_sounds.drain(..));
+        out.custom_decals.clear();
+        if !fx.hud.custom_decals.is_empty() {
+            out.custom_decals
+                .extend(fx.hud.custom_decals.iter().map(|(&k, v)| (k, v.clone())));
+        }
+        out.alive = alive;
+        out.observer_mode = observer_mode;
+        out.observed_target = observed_target;
+        out.is_demo = is_demo;
 
-        (
-            FrameView {
-                scene,
-                eye,
-                punch,
-                fov,
-                bob,
-                roll_deg,
-                shake_angles,
-                shake_z,
-                viewmodel_lag,
-                underwater_tint,
-                underwater_fov_delta,
-                viewmodel,
-                beams,
-                points,
-                lights,
-                elights,
-                decals,
-                lightstyles,
-                fog,
-                anim_sounds,
-                listener_right,
-                waterlevel,
-                entity_positions,
-                impact_sounds,
-                radio_audio,
-                reload_sounds,
-                custom_decals,
-                alive,
-                observer_mode,
-                observed_target,
-                is_demo,
-                player_weapons,
-                stats,
-            },
-            registry_changed.then(|| self.models.clone()),
-        )
+        added_tempent_client_model
     }
 
+    #[cfg(test)]
     fn collect_bullet_impacts(
         &mut self,
         fired: &[FiredEvent],
@@ -1253,9 +1762,28 @@ impl ViewBuilder {
         now: f64,
         show_client_impacts: bool,
     ) -> Vec<SoundStart> {
+        let mut out = Vec::new();
+        self.collect_bullet_impacts_into(fired, scene_entities, now, show_client_impacts, &mut out);
+        out
+    }
+
+    fn collect_bullet_impacts_into(
+        &mut self,
+        fired: &[FiredEvent],
+        scene_entities: &[RenderEntity],
+        now: f64,
+        show_client_impacts: bool,
+        sounds: &mut Vec<SoundStart>,
+    ) {
         let Some(ref coll) = self.collision else {
-            return Vec::new();
+            return;
         };
+        if !fired
+            .iter()
+            .any(|ev| matches!(&ev.fx, EventFx::Weapon(w) if w.bullets.is_some()))
+        {
+            return;
+        }
         let brush_targets: Vec<(u16, u16, BrushCollider)> = scene_entities
             .iter()
             .filter(|e| (e.effects & EF_NODRAW) == 0 && e.solid == SOLID_BSP)
@@ -1275,7 +1803,6 @@ impl ViewBuilder {
                 }
             })
             .collect();
-        let mut sounds = Vec::new();
         let base_seed = (now * 1000.0) as u32;
         for (ev_idx, ev) in fired.iter().enumerate() {
             let EventFx::Weapon(w) = &ev.fx else {
@@ -1351,7 +1878,6 @@ impl ViewBuilder {
                 }
             }
         }
-        sounds
     }
 
     fn emit_client_hitboxes(
@@ -1497,19 +2023,25 @@ impl ViewBuilder {
         surface_material_to_char(self.materials.lookup(&tex.name))
     }
 
-    fn sample_viewmodel_events(
+    #[allow(clippy::too_many_arguments)]
+    fn sample_viewmodel_events_into(
         &mut self,
         vm: &ViewmodelView,
         prev_anim: Option<ViewAnimState>,
         now_sec: f32,
-    ) -> Vec<(i32, String)> {
-        let mut out = Vec::new();
-        let key = vm.path.to_ascii_lowercase();
-        if !self.vm_seq_cache.contains_key(&key) {
+        now: f64,
+        eye: Vec3,
+        view_plus_punch: Vec3,
+        out_anim_sounds: &mut Vec<String>,
+    ) {
+        self.vm_key_scratch.clear();
+        self.vm_key_scratch
+            .extend(vm.path.chars().map(|c| c.to_ascii_lowercase()));
+        if !self.vm_seq_cache.contains_key(&self.vm_key_scratch) {
             let meta = self
                 .vfs
                 .as_ref()
-                .and_then(|vfs| StudioModel::load(vfs, &key).ok())
+                .and_then(|vfs| StudioModel::load(vfs, &self.vm_key_scratch).ok())
                 .map(|m| {
                     m.sequences
                         .into_iter()
@@ -1521,15 +2053,20 @@ impl ViewBuilder {
                         })
                         .collect()
                 });
+            let key = self.vm_key_scratch.clone();
             if let Some(list) = meta {
-                self.vm_seq_cache.insert(key.clone(), list);
+                self.vm_seq_cache.insert(key, list);
             } else {
-                self.vm_seq_cache.insert(key.clone(), Vec::new());
+                self.vm_seq_cache.insert(key, Vec::new());
             }
         }
         let seq_idx = vm.sequence.max(0) as usize;
-        let Some(seq_meta) = self.vm_seq_cache.get(&key).and_then(|v| v.get(seq_idx)) else {
-            return out;
+        let Some(seq_meta) = self
+            .vm_seq_cache
+            .get(&self.vm_key_scratch)
+            .and_then(|v| v.get(seq_idx))
+        else {
+            return;
         };
         let cur_frame = studio_frame(
             0.0,
@@ -1540,39 +2077,57 @@ impl ViewBuilder {
             seq_meta.num_frames,
             seq_meta.looping,
         );
-        let switched_anim = self.last_vm_path != key
+        let switched_anim = self.last_vm_path != self.vm_key_scratch
             || prev_anim.is_none_or(|a| {
                 a.sequence != vm.sequence || (a.started - vm.animtime).abs() > 1e-4
             })
             || (self.last_vm_animtime - vm.animtime).abs() > 1e-4;
         let prev_frame = if switched_anim { -0.01 } else { self.last_vm_frame };
-        self.last_vm_path = key;
+        if self.last_vm_path != self.vm_key_scratch {
+            self.last_vm_path.clear();
+            self.last_vm_path.push_str(&self.vm_key_scratch);
+        }
         self.last_vm_animtime = vm.animtime;
         self.last_vm_frame = cur_frame;
         if cur_frame > prev_frame {
             for ev in &seq_meta.events {
                 let f = ev.frame as f32;
                 if f > prev_frame && f <= cur_frame {
-                    out.push((ev.event, ev.options.clone()));
+                    match ev.event {
+                        5001 | 5011 | 5021 | 5031 => {
+                            let (fwd, _, _) = crate::render::scene::angle_vectors(view_plus_punch);
+                            self.dlights.add_light(DynamicLight {
+                                key: 9999,
+                                entity_light: false,
+                                origin: eye + fwd * 26.0,
+                                radius: 180.0,
+                                color: [255, 195, 95],
+                                die: now + 0.05,
+                                decay: 1800.0,
+                            });
+                        }
+                        5004 if !ev.options.is_empty() => {
+                            out_anim_sounds.push(ev.options.clone());
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
-        out
     }
 
     /// `R_AddEntity`'s input for one entity of the frame.
     fn render_entity(
         &mut self,
         e: &VisibleEntity,
-        player_models: &BTreeMap<u8, String>,
         dt: f32,
         time: f32,
     ) -> Option<RenderEntity> {
         let player_model = (e.kind == EntityKind::Player)
             .then(|| e.number.checked_sub(1))
             .flatten()
-            .and_then(|slot| player_models.get(&(slot as u8)))
-            .and_then(|path| self.client_handle(path));
+            .and_then(|slot| u8::try_from(slot).ok())
+            .and_then(|slot| self.player_model_handle(slot));
         let model = match player_model {
             Some(h) => h,
             None => self.models.resolve(i32::from(e.modelindex))?,
@@ -1662,6 +2217,13 @@ impl ViewBuilder {
         let Some(world) = self.collision.as_deref() else {
             return;
         };
+        if !scene
+            .entities
+            .iter()
+            .any(|e| e.rendermode == EntRenderMode::Glow && (e.effects & EF_NODRAW) == 0)
+        {
+            return;
+        }
         let colliders = collect_opaque_brush_colliders(&scene.entities, &self.models);
         let eye = scene.view.origin;
         for e in &mut scene.entities {
@@ -1868,34 +2430,47 @@ impl ViewBuilder {
         }
     }
 
-    fn viewmodel(
+    fn populate_viewmodel_into(
         &self,
-        precache: &PrecacheTables,
+        out: &mut Option<ViewmodelView>,
         alive: bool,
         fov: f32,
         viewmodel_index: i32,
         inputs: &ViewInputs,
-    ) -> Option<ViewmodelView> {
+    ) {
         // Hide the viewmodel at sniper scope zoom tiers (<= 40 deg), keeping AUG/SG552 (55 deg).
-        if !alive || !inputs.draw_viewmodel || viewmodel_index <= 0 || fov <= 40.0 {
-            return None;
-        }
-        let path = precache.model(u16::try_from(viewmodel_index).ok()?)?;
-        if path.is_empty() {
-            return None;
+        if !alive
+            || !inputs.draw_viewmodel
+            || viewmodel_index <= 0
+            || fov <= 40.0
+            || self.vm_path_scratch.is_empty()
+        {
+            *out = None;
+            return;
         }
         let anim = self.anim.unwrap_or(ViewAnimState {
             sequence: 0,
             body: 0,
             started: 0.0,
         });
-        Some(ViewmodelView {
-            path: path.to_string(),
-            sequence: anim.sequence,
-            body: anim.body,
-            animtime: anim.started,
-            right_hand: inputs.right_hand,
-        })
+        if let Some(existing) = out.as_mut() {
+            if existing.path != self.vm_path_scratch {
+                existing.path.clear();
+                existing.path.push_str(&self.vm_path_scratch);
+            }
+            existing.sequence = anim.sequence;
+            existing.body = anim.body;
+            existing.animtime = anim.started;
+            existing.right_hand = inputs.right_hand;
+        } else {
+            *out = Some(ViewmodelView {
+                path: self.vm_path_scratch.clone(),
+                sequence: anim.sequence,
+                body: anim.body,
+                animtime: anim.started,
+                right_hand: inputs.right_hand,
+            });
+        }
     }
 }
 
@@ -1924,8 +2499,8 @@ fn is_shadow_eligible(
     if entry.kind != ModelKind::Studio {
         return false;
     }
-    let lower = entry.name.to_ascii_lowercase();
-    let is_hostage = lower.contains("scientist") || lower.contains("hostage");
+    let is_hostage = contains_ascii_ignore_case(&entry.name, "scientist")
+        || contains_ascii_ignore_case(&entry.name, "hostage");
     // Dead hostages switch to MOVETYPE_TOSS (6) + SOLID_NOT (0); live ones stay SOLID_SLIDEBOX (3).
     is_hostage && !(e.state.solid == 0 && e.state.movetype != 0)
 }
@@ -2631,5 +3206,169 @@ mod tests {
         if builder.vfs.is_some() {
             assert!(fv7.anim_sounds.is_empty(), "5004 must not double-play on server ack");
         }
+    }
+
+    #[test]
+    fn build_into_reuses_frame_view_buffers_and_flat_entity_positions() {
+        use cs_clientcore::PrecacheEntry;
+        use cs_clientcore::interp::{EmitResult, VisibleEntity};
+        use cs_proto48::delta::{GoldSrcClientData, GoldSrcEntityState};
+
+        let mut builder = ViewBuilder::new();
+        let mut precache = PrecacheTables::default();
+        precache.models.insert(
+            1,
+            PrecacheEntry {
+                name: "maps/de_dust2.bsp".into(),
+                download_size: 0,
+                flags: 0,
+            },
+        );
+        precache.models.insert(
+            2,
+            PrecacheEntry {
+                name: "models/player.mdl".into(),
+                download_size: 0,
+                flags: 0,
+            },
+        );
+        precache.models.insert(
+            3,
+            PrecacheEntry {
+                name: "models/v_ak47.mdl".into(),
+                download_size: 0,
+                flags: 0,
+            },
+        );
+        precache.models.insert(
+            4,
+            PrecacheEntry {
+                name: "models/p_ak47.mdl".into(),
+                download_size: 0,
+                flags: 0,
+            },
+        );
+
+        let mut userinfos = BTreeMap::new();
+        userinfos.insert(1, r"\name\Bot1\model\urban\".to_string());
+        userinfos.insert(2, r"\name\Bot2\model\leet\".to_string());
+
+        let cd = GoldSrcClientData {
+            health: 100.0,
+            weapons: WEAPON_SUIT_BIT,
+            fov: 90.0,
+            viewmodel: 3,
+            weaponanim: 0,
+            ..Default::default()
+        };
+        let make_emitted = |t: f32| EmitResult {
+            entities: (2u16..=17)
+                .map(|num| VisibleEntity {
+                    number: num,
+                    kind: EntityKind::Player,
+                    model: CoreModelKind::Studio,
+                    modelindex: 2,
+                    origin: Vec3::new(num as f32 * 10.0 + t, 20.0, 0.0),
+                    angles: Vec3::ZERO,
+                    frame: t,
+                    sequence: 4,
+                    rendermode: 0,
+                    renderamt: 255,
+                    renderfx: 0,
+                    rendercolor: [255, 255, 255],
+                    local_player: false,
+                    studio_lerp: true,
+                    latched: Default::default(),
+                    state: GoldSrcEntityState {
+                        weaponmodel: 4,
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let mut fx = ClientEffects::default();
+        let mut frame_view = FrameView::default();
+
+        // Warm-up frame allocates initial capacities.
+        let _ = builder.build_parts_into(
+            &mut frame_view,
+            &precache,
+            &mut fx,
+            &userinfos,
+            Some(cd.clone()),
+            Some(0),
+            None,
+            make_emitted(0.0),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(1.0),
+        );
+        assert!(frame_view.entity_positions.len() >= DEFAULT_MAX_EDICTS);
+        assert_eq!(frame_view.entity_position(2), Some(Vec3::new(20.0, 20.0, 0.0)));
+        assert_eq!(frame_view.entity_position(17), Some(Vec3::new(170.0, 20.0, 0.0)));
+        assert_eq!(frame_view.entity_position(999), None);
+        assert_eq!(frame_view.player_weapons.get(&2).map(String::as_str), Some("ak47"));
+
+        let ent_ptr = frame_view.scene.entities.as_ptr();
+        let ent_cap = frame_view.scene.entities.capacity();
+        let pos_ptr = frame_view.entity_positions.as_ptr();
+        let vm_path_ptr = frame_view
+            .viewmodel
+            .as_ref()
+            .expect("viewmodel present")
+            .path
+            .as_ptr();
+
+        // Steady-state frames reuse exact heap buffers (zero reallocations).
+        for step in 1..=10 {
+            let t = step as f32;
+            // Simulate app.rs take_scene / restore_scene round-trip across render_frame.
+            let taken = frame_view.take_scene();
+            frame_view.restore_scene(taken);
+            let _ = builder.build_parts_into(
+                &mut frame_view,
+                &precache,
+                &mut fx,
+                &userinfos,
+                Some(cd.clone()),
+                Some(0),
+                None,
+                make_emitted(t),
+                Vec::new(),
+                Vec3::ZERO,
+                &inputs(1.0 + f64::from(step) * 0.01),
+            );
+            assert_eq!(frame_view.scene.entities.as_ptr(), ent_ptr);
+            assert_eq!(frame_view.scene.entities.capacity(), ent_cap);
+            assert_eq!(frame_view.entity_positions.as_ptr(), pos_ptr);
+            assert_eq!(
+                frame_view.viewmodel.as_ref().unwrap().path.as_ptr(),
+                vm_path_ptr
+            );
+            assert_eq!(
+                frame_view.entity_position(2),
+                Some(Vec3::new(20.0 + t, 20.0, 0.0))
+            );
+        }
+
+        // Entity #17 removed on next frame: flat table clears stale slot to None.
+        let _ = builder.build_parts_into(
+            &mut frame_view,
+            &precache,
+            &mut fx,
+            &userinfos,
+            Some(cd),
+            Some(0),
+            None,
+            EmitResult::default(),
+            Vec::new(),
+            Vec3::ZERO,
+            &inputs(2.0),
+        );
+        assert_eq!(frame_view.entity_position(2), None);
+        assert_eq!(frame_view.entity_position(17), None);
+        assert!(frame_view.player_weapons.is_empty());
     }
 }

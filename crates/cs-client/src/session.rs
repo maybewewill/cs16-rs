@@ -665,19 +665,38 @@ impl Session {
 
     /// Builds the frame: advances the client clock, runs the effects, interpolates. `None`
     /// without a session or before the client is in the game.
+    #[allow(dead_code)]
     pub fn build_view(
         &mut self,
         view_angles: Vec3,
         inputs: &ViewInputs,
     ) -> Option<(FrameView, Option<cs_client::render::scene::ModelRegistry>)> {
+        let mut out = FrameView::default();
+        let reg = self.build_view_into(&mut out, view_angles, inputs)?;
+        Some((out, reg))
+    }
+
+    /// Zero-alloc variant of [`Self::build_view`] that reuses `out`'s internal `Vec` buffers
+    /// across frames. Returns `None` without an active session; otherwise returns
+    /// `Some(updated_registry)`.
+    pub fn build_view_into(
+        &mut self,
+        out: &mut FrameView,
+        view_angles: Vec3,
+        inputs: &ViewInputs,
+    ) -> Option<Option<cs_client::render::scene::ModelRegistry>> {
         let Session { kind, view, .. } = self;
         match kind {
             Kind::None => None,
-            Kind::Local { game, .. } => Some(view.build(game.connection_mut(), view_angles, inputs)),
-            Kind::Remote { conn, .. } => Some(view.build(&mut **conn, view_angles, inputs)),
+            Kind::Local { game, .. } => {
+                Some(view.build_into(out, game.connection_mut(), view_angles, inputs))
+            }
+            Kind::Remote { conn, .. } => {
+                Some(view.build_into(out, &mut **conn, view_angles, inputs))
+            }
             Kind::Demo { player, fired } => {
                 let events = std::mem::take(fired);
-                Some(view.build_demo(player, events, view_angles, inputs))
+                Some(view.build_demo_into(out, player, events, view_angles, inputs))
             }
         }
     }

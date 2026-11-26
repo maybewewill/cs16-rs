@@ -470,7 +470,7 @@ pub fn register_default_cvars(reg: &mut CVarRegistry) {
     reg.register("gl_flipmatrix", "0", arch, "[compat] Flip projection matrix for legacy 3dfx MiniGL");
     reg.register("gl_keeptjunctions", "1", arch, "[compat] Keep T-junction vertices on BSP faces");
     reg.register("gl_lightholes", "1", arch, "[compat] Dynamic light holes");
-    reg.register("gl_lowlatency", "0", arch, "Minimize GPU frame queue latency");
+    reg.register("gl_lowlatency", "1", arch, "Minimize GPU frame queue latency");
     reg.register("gl_lowlatency_debugoutput", "0", CVarFlags::NONE, "Low-latency debug logging");
     reg.register("gl_lowlatency_maxslop_ms", "0", CVarFlags::NONE, "Low-latency max slop (ms)");
     reg.register("gl_lowlatency_minslop_ms", "0", CVarFlags::NONE, "Low-latency min slop (ms)");
