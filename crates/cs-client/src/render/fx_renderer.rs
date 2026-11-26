@@ -92,6 +92,8 @@ pub struct FxRenderer {
     vertex_cap: usize,
     alpha_count: u32,
     additive_count: u32,
+    scratch_alpha_verts: Vec<FxVertex>,
+    scratch_add_verts: Vec<FxVertex>,
     frame_upload_bytes: u64,
 }
 
@@ -232,6 +234,8 @@ impl FxRenderer {
             vertex_cap,
             alpha_count: 0,
             additive_count: 0,
+            scratch_alpha_verts: Vec::new(),
+            scratch_add_verts: Vec::new(),
             frame_upload_bytes: 0,
         }
     }
@@ -265,14 +269,18 @@ impl FxRenderer {
         beams: &[FxBeam],
         points: &[FxPoint],
     ) {
-        let mut alpha_verts: Vec<FxVertex> = Vec::new();
-        let mut add_verts: Vec<FxVertex> = Vec::new();
+        self.scratch_alpha_verts.clear();
+        self.scratch_add_verts.clear();
 
         for b in beams {
             let dir = (b.end - b.start).normalize_or_zero();
             let to_cam = (params.cam_pos - b.start).normalize_or_zero();
             let side = dir.cross(to_cam).normalize_or_zero() * (b.width * 0.5);
-            let dst = if b.additive { &mut add_verts } else { &mut alpha_verts };
+            let dst = if b.additive {
+                &mut self.scratch_add_verts
+            } else {
+                &mut self.scratch_alpha_verts
+            };
             push_raw_quad(
                 dst,
                 b.start - side,
@@ -284,7 +292,11 @@ impl FxRenderer {
         }
 
         for p in points {
-            let dst = if p.additive { &mut add_verts } else { &mut alpha_verts };
+            let dst = if p.additive {
+                &mut self.scratch_add_verts
+            } else {
+                &mut self.scratch_alpha_verts
+            };
             push_quad(
                 dst,
                 p.origin,
@@ -312,12 +324,13 @@ impl FxRenderer {
         );
         self.frame_upload_bytes += std::mem::size_of::<FxUniforms>() as u64;
 
-        self.alpha_count = alpha_verts.len() as u32;
-        self.additive_count = add_verts.len() as u32;
-        alpha_verts.extend_from_slice(&add_verts);
+        self.alpha_count = self.scratch_alpha_verts.len() as u32;
+        self.additive_count = self.scratch_add_verts.len() as u32;
+        self.scratch_alpha_verts
+            .extend_from_slice(&self.scratch_add_verts);
 
-        if alpha_verts.len() > self.vertex_cap {
-            self.vertex_cap = alpha_verts.len().next_power_of_two();
+        if self.scratch_alpha_verts.len() > self.vertex_cap {
+            self.vertex_cap = self.scratch_alpha_verts.len().next_power_of_two();
             self.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("fx_vbuf"),
                 size: (self.vertex_cap * std::mem::size_of::<FxVertex>()) as u64,
@@ -325,10 +338,14 @@ impl FxRenderer {
                 mapped_at_creation: false,
             });
         }
-        if !alpha_verts.is_empty() {
-            queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&alpha_verts));
+        if !self.scratch_alpha_verts.is_empty() {
+            queue.write_buffer(
+                &self.vertex_buf,
+                0,
+                bytemuck::cast_slice(&self.scratch_alpha_verts),
+            );
             self.frame_upload_bytes +=
-                (alpha_verts.len() * std::mem::size_of::<FxVertex>()) as u64;
+                (self.scratch_alpha_verts.len() * std::mem::size_of::<FxVertex>()) as u64;
         }
     }
 

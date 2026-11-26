@@ -287,15 +287,24 @@ impl BspPvsData {
         ((-node_idx - 1) as usize).min(self.leafs.len().saturating_sub(1))
     }
 
-    fn visible_faces(&self, cam_leaf: usize, face_count: usize) -> Option<Vec<bool>> {
+    fn visible_faces_into(
+        &self,
+        cam_leaf: usize,
+        face_count: usize,
+        pvs: &mut Vec<bool>,
+        mask: &mut Vec<bool>,
+    ) -> bool {
         if cam_leaf == 0 || self.visibility.is_empty() || self.vis_leafs == 0 {
-            return None;
+            return false;
         }
-        let leaf = self.leafs.get(cam_leaf)?;
+        let Some(leaf) = self.leafs.get(cam_leaf) else {
+            return false;
+        };
         if leaf.vis_offset < 0 {
-            return None;
+            return false;
         }
-        let mut pvs = vec![false; self.vis_leafs];
+        pvs.clear();
+        pvs.resize(self.vis_leafs, false);
         let mut in_idx = leaf.vis_offset as usize;
         let mut out_leaf = 0usize;
         while out_leaf < self.vis_leafs && in_idx < self.visibility.len() {
@@ -316,7 +325,8 @@ impl BspPvsData {
                 out_leaf += 8;
             }
         }
-        let mut mask = vec![false; face_count];
+        mask.clear();
+        mask.resize(face_count, false);
         for (v, &vis) in pvs.iter().enumerate() {
             if !vis {
                 continue;
@@ -334,7 +344,7 @@ impl BspPvsData {
                 }
             }
         }
-        Some(mask)
+        true
     }
 }
 
@@ -368,6 +378,10 @@ struct UploadedMap {
     pvs_cached_leaf: usize,
     pvs_batches: Vec<(RenderMode, usize, u32, u32)>,
     pvs_triangles: usize,
+    pvs_scratch_pvs: Vec<bool>,
+    pvs_scratch_mask: Vec<bool>,
+    pvs_scratch_grouped: Vec<(u8, usize, RenderMode, u32, u32)>,
+    pvs_scratch_indices: Vec<u32>,
 }
 
 pub struct BspRenderer {
@@ -385,6 +399,7 @@ pub struct BspRenderer {
     ent_cap: usize,
     ent_stride: u64,
     ent_bg: wgpu::BindGroup,
+    ent_scratch_bytes: Vec<u8>,
     skip_submodels: bool,
     global_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
@@ -546,6 +561,7 @@ impl BspRenderer {
             ent_cap,
             ent_stride,
             ent_bg,
+            ent_scratch_bytes: Vec::new(),
             skip_submodels: false,
             global_bgl,
             tex_bgl,
@@ -792,6 +808,10 @@ impl BspRenderer {
             pvs_cached_leaf: usize::MAX,
             pvs_batches: Vec::new(),
             pvs_triangles: 0,
+            pvs_scratch_pvs: Vec::new(),
+            pvs_scratch_mask: Vec::new(),
+            pvs_scratch_grouped: Vec::new(),
+            pvs_scratch_indices: Vec::new(),
         });
     }
 
@@ -910,10 +930,56 @@ impl BspRenderer {
         draws: &[&BrushDraw],
         time_sec: f32,
     ) -> Vec<PreparedBrushEntity> {
+        let mut prepared = Vec::with_capacity(draws.len());
+        self.prepare_entities_iter(device, queue, draws.iter().copied(), draws.len(), time_sec, |e| {
+            prepared.push(e);
+        });
+        prepared
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_entities_split_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        solid_draws: &[BrushDraw],
+        trans_draws: &[BrushDraw],
+        time_sec: f32,
+        out_solid: &mut Vec<PreparedBrushEntity>,
+        out_trans: &mut Vec<PreparedBrushEntity>,
+    ) {
+        out_solid.clear();
+        out_trans.clear();
+        let total = solid_draws.len() + trans_draws.len();
+        self.prepare_entities_iter(
+            device,
+            queue,
+            solid_draws.iter().chain(trans_draws.iter()),
+            total,
+            time_sec,
+            |e| {
+                if e.is_opaque() {
+                    out_solid.push(e);
+                } else {
+                    out_trans.push(e);
+                }
+            },
+        );
+    }
+
+    fn prepare_entities_iter<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        draws: impl Iterator<Item = &'a BrushDraw>,
+        count_hint: usize,
+        time_sec: f32,
+        mut emit: impl FnMut(PreparedBrushEntity),
+    ) {
         let Some(map) = &self.uploaded else {
-            return Vec::new();
+            return;
         };
-        let needed = draws.len() + 1;
+        let needed = count_hint + 1;
         if needed > self.ent_cap {
             self.ent_cap = needed.next_power_of_two();
             let (buf, bg) =
@@ -921,9 +987,11 @@ impl BspRenderer {
             self.ent_buf = buf;
             self.ent_bg = bg;
         }
-        let mut bytes = vec![0u8; draws.len() * self.ent_stride as usize];
-        let mut prepared = Vec::with_capacity(draws.len());
-        for (i, d) in draws.iter().enumerate() {
+        let stride = self.ent_stride as usize;
+        self.ent_scratch_bytes.clear();
+        self.ent_scratch_bytes.resize(count_hint * stride, 0);
+        let mut written_slots = 0usize;
+        for (i, d) in draws.enumerate() {
             let submodel = d.submodel as usize;
             if map
                 .model_batches
@@ -939,10 +1007,14 @@ impl BspRenderer {
                 color,
                 params: [mode, scroll, 0.0, 0.0],
             };
-            let off = i * self.ent_stride as usize;
+            let off = i * stride;
+            if off + stride > self.ent_scratch_bytes.len() {
+                self.ent_scratch_bytes.resize(off + stride, 0);
+            }
             let raw = bytemuck::bytes_of(&u);
-            bytes[off..off + raw.len()].copy_from_slice(raw);
-            prepared.push(PreparedBrushEntity {
+            self.ent_scratch_bytes[off..off + raw.len()].copy_from_slice(raw);
+            written_slots = written_slots.max(i + 1);
+            emit(PreparedBrushEntity {
                 slot: i as u32 + 1,
                 submodel,
                 mode: d.mode,
@@ -950,11 +1022,15 @@ impl BspRenderer {
                 frame: d.frame,
             });
         }
-        if !bytes.is_empty() {
-            queue.write_buffer(&self.ent_buf, self.ent_stride, &bytes);
-            self.frame_upload_bytes += bytes.len() as u64;
+        let upload_len = written_slots * stride;
+        if upload_len > 0 {
+            queue.write_buffer(
+                &self.ent_buf,
+                self.ent_stride,
+                &self.ent_scratch_bytes[..upload_len],
+            );
+            self.frame_upload_bytes += upload_len as u64;
         }
-        prepared
     }
 
     pub fn draw_entities<'a>(
@@ -1030,12 +1106,17 @@ impl BspRenderer {
         map.pvs_batches.clear();
         map.pvs_triangles = 0;
 
-        let Some(mask) = map.pvs_data.visible_faces(leaf, map.world_spans.len()) else {
+        if !map.pvs_data.visible_faces_into(
+            leaf,
+            map.world_spans.len(),
+            &mut map.pvs_scratch_pvs,
+            &mut map.pvs_scratch_mask,
+        ) {
             return;
-        };
-        let mut grouped: Vec<(u8, usize, RenderMode, &WorldFaceSpan)> = Vec::new();
+        }
+        map.pvs_scratch_grouped.clear();
         for (fi, span_opt) in map.world_spans.iter().enumerate() {
-            if !mask.get(fi).copied().unwrap_or(false) {
+            if !map.pvs_scratch_mask.get(fi).copied().unwrap_or(false) {
                 continue;
             }
             let Some(span) = span_opt else {
@@ -1047,29 +1128,35 @@ impl BspRenderer {
                 RenderMode::Transparent => 2,
                 RenderMode::Additive => 3,
             };
-            grouped.push((rank, span.texture_index, span.render_mode, span));
+            map.pvs_scratch_grouped.push((
+                rank,
+                span.texture_index,
+                span.render_mode,
+                span.first_index,
+                span.index_count,
+            ));
         }
-        grouped.sort_unstable_by_key(|g| (g.0, g.1));
+        map.pvs_scratch_grouped.sort_unstable_by_key(|g| (g.0, g.1));
 
-        let mut pvs_indices: Vec<u32> = Vec::with_capacity(map.world_raw_indices.len() / 2);
-        for &(_, tex_idx, mode, span) in &grouped {
-            let start = span.first_index as usize;
-            let end = start + span.index_count as usize;
-            let dst_first = pvs_indices.len() as u32;
-            pvs_indices.extend_from_slice(&map.world_raw_indices[start..end]);
-            let count = span.index_count;
+        map.pvs_scratch_indices.clear();
+        for &(_, tex_idx, mode, first_index, index_count) in &map.pvs_scratch_grouped {
+            let start = first_index as usize;
+            let end = start + index_count as usize;
+            let dst_first = map.pvs_scratch_indices.len() as u32;
+            map.pvs_scratch_indices
+                .extend_from_slice(&map.world_raw_indices[start..end]);
             if let Some(last) = map.pvs_batches.last_mut()
                 && last.0 == mode
                 && last.1 == tex_idx
                 && last.2 + last.3 == dst_first
             {
-                last.3 += count;
+                last.3 += index_count;
             } else {
-                map.pvs_batches.push((mode, tex_idx, dst_first, count));
+                map.pvs_batches.push((mode, tex_idx, dst_first, index_count));
             }
         }
-        if pvs_indices.len() > map.pvs_ibuf_cap {
-            map.pvs_ibuf_cap = pvs_indices.len().next_power_of_two();
+        if map.pvs_scratch_indices.len() > map.pvs_ibuf_cap {
+            map.pvs_ibuf_cap = map.pvs_scratch_indices.len().next_power_of_two();
             map.pvs_ibuf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("bsp_pvs_ibuf"),
                 size: (map.pvs_ibuf_cap * std::mem::size_of::<u32>()) as u64,
@@ -1077,11 +1164,16 @@ impl BspRenderer {
                 mapped_at_creation: false,
             });
         }
-        if !pvs_indices.is_empty() {
-            queue.write_buffer(&map.pvs_ibuf, 0, bytemuck::cast_slice(&pvs_indices));
-            self.frame_upload_bytes += (pvs_indices.len() * std::mem::size_of::<u32>()) as u64;
+        if !map.pvs_scratch_indices.is_empty() {
+            queue.write_buffer(
+                &map.pvs_ibuf,
+                0,
+                bytemuck::cast_slice(&map.pvs_scratch_indices),
+            );
+            self.frame_upload_bytes +=
+                (map.pvs_scratch_indices.len() * std::mem::size_of::<u32>()) as u64;
         }
-        map.pvs_triangles = pvs_indices.len() / 3;
+        map.pvs_triangles = map.pvs_scratch_indices.len() / 3;
     }
 
     pub fn draw<'a>(

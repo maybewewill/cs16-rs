@@ -2220,6 +2220,7 @@ mod tests {
         (val as f32) / 1023.0
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn wgsl_skin_and_shade(
         bones_buf: &[u8],
         lut: &LightGammaUniform,
