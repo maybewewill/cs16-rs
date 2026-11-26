@@ -620,6 +620,13 @@ impl Session {
         with_conn!(self, c => Some(f(c.net_graph())), else None)
     }
 
+    pub fn with_precache<R>(&self, f: impl FnOnce(&cs_clientcore::PrecacheTables) -> R) -> Option<R> {
+        match &self.kind {
+            Kind::Demo { player, .. } => Some(f(player.precache())),
+            _ => with_conn!(self, c => Some(f(c.precache())), else None),
+        }
+    }
+
     pub fn precache_models_summary(&self) -> String {
         match &self.kind {
             Kind::Demo { player, .. } => {

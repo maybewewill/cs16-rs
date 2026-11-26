@@ -162,6 +162,7 @@ pub struct Cs16App {
     palette: VguiPalette,
     loc: Option<LocalizationTable>,
     audio: AudioEngine,
+    audio_precache_warmed: bool,
     runtime: Option<WindowRuntime>,
 
     session: Session,
@@ -312,6 +313,7 @@ impl Cs16App {
             palette,
             loc,
             audio,
+            audio_precache_warmed: false,
             runtime: None,
             session: Session::none(),
             camera: Camera::default(),
@@ -534,6 +536,7 @@ impl Cs16App {
         self.last_weapon = None;
         self.weapon_switch_timer = 0.0;
         self.audio.stop_all();
+        self.audio_precache_warmed = false;
         if let Some(rt) = &mut self.runtime {
             rt.renderer.set_model_registry(ModelRegistry::default());
             rt.renderer.clear_model_caches();
@@ -658,6 +661,7 @@ impl Cs16App {
             self.vgui_rt.load_scheme_fonts(v);
         }
         self.strafe_sidemove = 0.0;
+        self.audio_precache_warmed = false;
         self.sync_client_cvars_to_session(true);
         self.menu_ui.visible = false;
         self.console_ui.open = false;
@@ -733,6 +737,7 @@ impl Cs16App {
             }
         }
         self.audio.stop_all();
+        self.audio_precache_warmed = false;
         self.feeds = HudFeeds::default();
         self.hud_anim = HudAnimState::default();
         self.crosshair_state = CrosshairState::default();
@@ -1568,6 +1573,7 @@ impl Cs16App {
                     }
                     self.session.close();
                     self.session = sess;
+                    self.audio_precache_warmed = false;
                     self.menu_ui.visible = false;
                     self.sync_cursor_capture();
                 }
@@ -2139,6 +2145,19 @@ impl Cs16App {
         // 2. The frame of the session.
         let mut view: Option<FrameView> = None;
         if in_game {
+            if !self.audio_precache_warmed {
+                self.audio_precache_warmed = true;
+                if let Some(vfs) = self.vfs.as_ref() {
+                    let audio = &mut self.audio;
+                    let warmed = self
+                        .session
+                        .with_precache(|precache| audio.warmup_precache(vfs, precache))
+                        .unwrap_or(0);
+                    if warmed > 0 {
+                        info!(warmed, "Pre-decoded signon precache WAVs into audio cache");
+                    }
+                }
+            }
             self.in_game_frames += 1;
             if let Some(ui_mode) = self.launch.startup_ui.clone() {
                 let m = ui_mode.to_ascii_lowercase();

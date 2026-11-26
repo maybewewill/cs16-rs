@@ -102,11 +102,42 @@ impl SoundFadeState {
 
 #[derive(Debug, Clone)]
 struct VoxItem {
-    wav: Option<DecodedWav>,
+    wav: Option<Arc<DecodedWav>>,
     volume: f32,
     pitch: u8,
     end_frame: usize,
     pause_samples: usize,
+}
+
+/// Pre-decoded VOX word ready for lock-free playback on the audio thread without touching VFS.
+#[derive(Debug, Clone)]
+pub struct PredecodedVoxWord {
+    pub wav: Option<Arc<DecodedWav>>,
+    pub volume: f32,
+    pub pitch: u8,
+    pub pause_samples: usize,
+}
+
+/// Trims a decoded WAV to `[start_pct%, end_pct%]` of its frames, sharing the original [`Arc`]
+/// with zero allocations when `start_pct == 0 && end_pct >= 100`.
+pub fn trim_wav_percent(wav: Arc<DecodedWav>, start_pct: u8, end_pct: u8) -> Arc<DecodedWav> {
+    let total_frames = wav.frame_count();
+    let start_f = (total_frames * usize::from(start_pct.min(100))) / 100;
+    let end_f = ((total_frames * usize::from(end_pct.min(100))) / 100)
+        .min(total_frames)
+        .max(start_f);
+    if start_f == 0 && end_f == total_frames {
+        return wav;
+    }
+    let ch = usize::from(wav.channels.max(1));
+    let slice: Vec<f32> = wav.samples[start_f * ch..end_f * ch].to_vec();
+    Arc::new(DecodedWav {
+        sample_rate: wav.sample_rate,
+        channels: wav.channels,
+        samples: Arc::from(slice),
+        loop_start: None,
+        loop_end: None,
+    })
 }
 
 /// Brush-model sound origin (`hw.dll:FUN_101fd050` / `S_StartDynamicSound`):
@@ -129,7 +160,7 @@ struct ChannelSlot {
     pitch: u8,
     sample_name: String,
     rate_jitter: f64,
-    wav: Option<DecodedWav>,
+    wav: Option<Arc<DecodedWav>>,
     phase: f64,
     left_gain: f32,
     right_gain: f32,
@@ -176,7 +207,7 @@ struct VoiceStream {
 }
 
 pub struct GoldSrcMixer {
-    wav_cache: HashMap<String, Option<DecodedWav>>,
+    wav_cache: HashMap<String, Option<Arc<DecodedWav>>>,
     sentences: SentenceTable,
     dynamic: Vec<ChannelSlot>,
     static_ch: Vec<ChannelSlot>,
@@ -268,19 +299,30 @@ impl GoldSrcMixer {
 
     pub fn insert_cached_wav(&mut self, path: &str, bytes: &[u8]) {
         let key = normalize_sound_path(path);
-        let decoded = decode_wav(bytes).ok();
+        let decoded = decode_wav(bytes).ok().map(Arc::new);
         self.wav_cache.insert(key, decoded);
     }
 
     pub fn load_wav_from_vfs(&mut self, vfs: Option<&Vfs>, path: &str) -> Option<DecodedWav> {
+        self.load_wav_arc_from_vfs(vfs, path).map(|w| (*w).clone())
+    }
+
+    pub fn load_wav_arc_from_vfs(
+        &mut self,
+        vfs: Option<&Vfs>,
+        path: &str,
+    ) -> Option<Arc<DecodedWav>> {
         let key = normalize_sound_path(path);
         if let Some(cached) = self.wav_cache.get(&key) {
             return cached.clone();
         }
         let decoded = vfs
             .and_then(|v| v.read_bytes(&key).ok())
-            .and_then(|b| decode_wav(&b).ok());
-        self.wav_cache.insert(key, decoded.clone());
+            .and_then(|b| decode_wav(&b).ok())
+            .map(Arc::new);
+        if vfs.is_some() {
+            self.wav_cache.insert(key, decoded.clone());
+        }
         decoded
     }
 
@@ -415,6 +457,47 @@ impl GoldSrcMixer {
         }
     }
 
+    /// Lock-free audio-thread listener update using sorted `(entity_id, origin)` pairs
+    /// (`O(log N)` lookup with zero hashing or allocations).
+    pub fn update_listener_and_sorted_entities(
+        &mut self,
+        listener: ListenerState,
+        sorted_positions: &[(u16, Vec3)],
+    ) {
+        self.listener = listener;
+        self.dsp.set_underwater(listener.waterlevel >= 3);
+
+        for ch in self.dynamic.iter_mut().chain(self.static_ch.iter_mut()) {
+            if !ch.active {
+                continue;
+            }
+            if !ch.is_2d
+                && ch.entity > 0
+                && let Ok(idx) = sorted_positions.binary_search_by_key(&ch.entity, |&(id, _)| id)
+            {
+                ch.origin = sorted_positions[idx].1;
+            }
+            let (l, r, occ, alive) = Self::spatialize(
+                &self.listener,
+                ch.origin,
+                ch.master_vol,
+                ch.attenuation,
+                ch.is_2d,
+                ch.is_static && ch.wav.as_ref().is_some_and(|w| w.loop_start.is_some()),
+                self.occlusion_factor,
+                None,
+            );
+            if !alive {
+                ch.active = false;
+                ch.vox_queue.clear();
+            } else {
+                ch.left_gain = l;
+                ch.right_gain = r;
+                ch.occluded = occ;
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spatialize(
         listener: &ListenerState,
@@ -527,10 +610,61 @@ impl GoldSrcMixer {
             }
             return;
         }
-        let Some(wav) = self.load_wav_from_vfs(vfs, name) else {
+        let Some(wav) = self.load_wav_arc_from_vfs(vfs, name) else {
             return;
         };
         self.start_decoded_wav(wav, s, is_static, occlusion_fn);
+    }
+
+    /// Starts, alters, or stops a sound using a main-thread pre-decoded `Arc<DecodedWav>` without
+    /// touching disk or VFS on the real-time audio thread.
+    pub fn start_predecoded_sound(
+        &mut self,
+        wav: Option<Arc<DecodedWav>>,
+        s: &SoundStart,
+        is_static: bool,
+    ) {
+        if s.is_stop() {
+            self.stop_channel(s.entity, s.channel);
+            return;
+        }
+        let is_alter = (s.flags & (SND_FL_CHANGE_VOL | SND_FL_CHANGE_PITCH)) != 0;
+        if is_alter {
+            let pool = if is_static {
+                &mut self.static_ch
+            } else {
+                &mut self.dynamic
+            };
+            if let Some(ch) = pool
+                .iter_mut()
+                .find(|c| c.active && c.entity == s.entity && c.channel == s.channel)
+            {
+                if (s.flags & SND_FL_CHANGE_VOL) != 0 {
+                    ch.master_vol = s.volume.clamp(0.0, 2.0);
+                }
+                if (s.flags & SND_FL_CHANGE_PITCH) != 0 {
+                    ch.pitch = s.pitch.max(2);
+                }
+                let (l, r, occ, _) = Self::spatialize(
+                    &self.listener,
+                    ch.origin,
+                    ch.master_vol,
+                    ch.attenuation,
+                    ch.is_2d,
+                    is_static,
+                    self.occlusion_factor,
+                    None,
+                );
+                ch.left_gain = l;
+                ch.right_gain = r;
+                ch.occluded = occ;
+                return;
+            }
+        }
+        let Some(wav) = wav else {
+            return;
+        };
+        self.start_decoded_wav(wav, s, is_static, None);
     }
 
     pub fn start_2d_decoded(
@@ -542,12 +676,12 @@ impl GoldSrcMixer {
         pitch: u8,
     ) {
         let s = SoundStart::by_name("", entity, channel, Vec3::ZERO, volume, 0.0, pitch);
-        self.start_decoded_wav(wav, &s, false, None);
+        self.start_decoded_wav(Arc::new(wav), &s, false, None);
     }
 
     fn start_decoded_wav(
         &mut self,
-        wav: DecodedWav,
+        wav: Arc<DecodedWav>,
         s: &SoundStart,
         is_static: bool,
         occlusion_fn: Option<&dyn Fn(Vec3) -> bool>,
@@ -626,32 +760,52 @@ impl GoldSrcMixer {
         is_static: bool,
         occlusion_fn: Option<&dyn Fn(Vec3) -> bool>,
     ) {
-        let mut queue = VecDeque::new();
+        let mut queue = VecDeque::with_capacity(words.len());
         for w in words {
-            let wav = self.load_wav_from_vfs(vfs, &w.path);
+            let wav = self
+                .load_wav_arc_from_vfs(vfs, &w.path)
+                .map(|d| trim_wav_percent(d, w.start_pct, w.end_pct));
             let pause_samples = (w.pause_sec.max(0.0) * (MIX_SAMPLE_RATE as f32)).round() as usize;
-            let total_frames = wav.as_ref().map_or(0, DecodedWav::frame_count);
-            let start_f = (total_frames * usize::from(w.start_pct)) / 100;
-            let end_f = ((total_frames * usize::from(w.end_pct)) / 100).max(start_f);
-            let mut item_wav = wav;
-            if let Some(ref mut d) = item_wav {
-                let clamped_end = end_f.min(total_frames).max(start_f);
-                if start_f > 0 || clamped_end < total_frames {
-                    let ch = usize::from(d.channels.max(1));
-                    let slice: Vec<f32> = d.samples[start_f * ch..clamped_end * ch].to_vec();
-                    d.samples = Arc::from(slice);
-                    d.loop_start = None;
-                    d.loop_end = None;
-                }
-            }
+            let end_frame = wav.as_ref().map_or(0, |d| d.frame_count());
             queue.push_back(VoxItem {
-                wav: item_wav,
+                wav,
                 volume: (s.volume * w.volume).clamp(0.0, 2.0),
                 pitch: w.pitch.max(50),
-                end_frame: end_f.saturating_sub(start_f),
+                end_frame,
                 pause_samples,
             });
         }
+        self.enqueue_vox_queue(queue, s, is_static, occlusion_fn);
+    }
+
+    /// Starts a pre-decoded VOX sentence queue on the audio thread without touching VFS.
+    pub fn start_predecoded_vox(
+        &mut self,
+        words: Vec<PredecodedVoxWord>,
+        s: &SoundStart,
+        is_static: bool,
+    ) {
+        let mut queue = VecDeque::with_capacity(words.len());
+        for w in words {
+            let end_frame = w.wav.as_ref().map_or(0, |d| d.frame_count());
+            queue.push_back(VoxItem {
+                wav: w.wav,
+                volume: (s.volume * w.volume).clamp(0.0, 2.0),
+                pitch: w.pitch.max(50),
+                end_frame,
+                pause_samples: w.pause_samples,
+            });
+        }
+        self.enqueue_vox_queue(queue, s, is_static, None);
+    }
+
+    fn enqueue_vox_queue(
+        &mut self,
+        mut queue: VecDeque<VoxItem>,
+        s: &SoundStart,
+        is_static: bool,
+        occlusion_fn: Option<&dyn Fn(Vec3) -> bool>,
+    ) {
         let Some(first) = queue.pop_front() else {
             return;
         };
