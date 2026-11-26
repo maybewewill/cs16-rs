@@ -11,12 +11,13 @@
 
 [![CI](https://github.com/maybewewill/cs16-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/maybewewill/cs16-rs/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/maybewewill/cs16-rs?include_prereleases&color=c4b550)](https://github.com/maybewewill/cs16-rs/releases)
-[![Play in Browser](https://img.shields.io/badge/Play%20in%20Browser-WebGPU%20PWA-4c5844?logo=webassembly&logoColor=c4b550)](https://maybewewill.github.io/cs16-rs/)
+[![Parity: 100%](https://img.shields.io/badge/Parity-100%25-brightgreen.svg)](#parity-status--verification)
+[![Play in Browser](https://img.shields.io/badge/Play%20in%20Browser-Instant%20Demo%20%7C%20WebGPU-4c5844?logo=webassembly&logoColor=c4b550)](https://maybewewill.github.io/cs16-rs/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-3e4637.svg)](LICENSE)
 [![Rust 1.100](https://img.shields.io/badge/Rust-1.100%20%7C%20Edition%202024-dea584?logo=rust)](rust-toolchain.toml)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-2e7d32.svg)](Cargo.toml)
 
-[Play in Browser](https://maybewewill.github.io/cs16-rs/) · [Screenshots](#screenshots--footage) · [Releases](https://github.com/maybewewill/cs16-rs/releases) · [Quick Start](#quick-start) · [Modding (5 Languages)](docs/MODDING.md) · [Benchmarks](#performance--rewrite-advantages) · [Deployment](docs/DEPLOYMENT.md)
+[Play Instant Demo](https://maybewewill.github.io/cs16-rs/) · [Screenshots](#screenshots--footage) · [Releases](https://github.com/maybewewill/cs16-rs/releases) · [Quick Start](#quick-start) · [Modding (5 Languages)](docs/MODDING.md) · [Benchmarks](#performance--rewrite-advantages) · [Deployment](docs/DEPLOYMENT.md)
 
 </div>
 
@@ -25,15 +26,18 @@
 ## Screenshots & Footage
 
 <div align="center">
-  <img src=".github/assets/shot-dust2-hud.jpg" alt="cs16-rs live Vulkan rendering on de_dust2 with classic GoldSrc HUD and net_graph 1" width="100%">
+  <img src=".github/assets/gameplay-preview.gif" alt="cs16-rs real-time Vulkan gameplay preview on de_dust2 with AK-47, ZBots, classic GoldSrc HUD, and net_graph 1" width="100%">
   <br>
-  <sub><i>Unretouched 1280×720 real-time <code>wgpu</code> Vulkan capture on <code>de_dust2</code> using retail Steam assets, authentic HUD sprites, and GoldSrc <code>net_graph 1</code>.</i></sub>
+  <sub><i>Live <code>--release</code> LTO <code>wgpu</code> Vulkan capture on <code>de_dust2</code> — active ZBots, AK-47 viewmodel &amp; recoil, authentic GoldSrc HUD sprites, radar, and <code>net_graph 1</code>.</i></sub>
 </div>
 
 <br>
 
+> **▶ Play Instant Demo (`dm_rusthouse`) — Zero Steam Files Needed:** Open **[https://maybewewill.github.io/cs16-rs/](https://maybewewill.github.io/cs16-rs/)** and click **Play Instant Demo** (or run `cargo run --release -p cs-client -- --demo`) to launch a 5v5 ZBot match in `< 150 ms` on a 100% clean-room procedural `BSP v30` / `WAD3` / `MDL v10` / `.nav` arena. Mount your local Steam Half-Life folder anytime for full retail CS 1.6.
+
 | | |
 |---|---|
+| <img src=".github/assets/shot-dust2-hud.jpg" alt="de_dust2 Vulkan 1280x720" width="100%"><br><sub><b>de_dust2 (1280×720)</b> — Real-time Vulkan lighting, HUD &amp; <code>net_graph 1</code></sub> | <img src=".github/assets/shot-instant-demo.jpg" alt="dm_rusthouse Instant Demo" width="100%"><br><sub><b>▶ Instant Demo (<code>dm_rusthouse</code>)</b> — Zero Steam files, procedural clean-room 5v5 ZBots</sub> |
 | <img src=".github/assets/shot-main-menu.jpg" alt="Main Menu" width="100%"><br><sub><b>Main Menu</b> — <code>GameMenu.res</code> + transparent <code>cs16-rs</code> emblem</sub> | <img src=".github/assets/shot-buy-menu.jpg" alt="VGUI2 Buy Menu" width="100%"><br><sub><b>VGUI2 Buy Menu</b> — <code>Buy*.res</code> with amber <code>cs16-rs</code> crest</sub> |
 | <img src=".github/assets/shot-inferno-hud.jpg" alt="de_inferno gameplay" width="100%"><br><sub><b>de_inferno</b> — BSP lightmaps, skybox &amp; weapon viewmodel</sub> | <img src=".github/assets/shot-nuke-hud.jpg" alt="de_nuke gameplay" width="100%"><br><sub><b>de_nuke</b> — Classic GoldSrc geometry &amp; HUD rendering</sub> |
 | <img src=".github/assets/shot-scoreboard.jpg" alt="Scoreboard" width="100%"><br><sub><b>TAB Scoreboard &amp; ZBots</b> — <code>ScoreBoard.res</code> live match state</sub> | <img src=".github/assets/shot-console.jpg" alt="Developer Console" width="100%"><br><sub><b>Developer Console</b> — Steam 2003 <code>TrackerScheme.res</code> chrome</sub> |
@@ -42,44 +46,55 @@
 
 ## Feature Highlights
 
-- **Two-Way Protocol 48 Interoperability:** Retail Steam `hl.exe` connects to `cs-server`, and `cs-client` connects to retail `hlds.exe` (Steam Build 10210). Full `de_*` Bomb/Defusal, `cs_*` Hostage Rescue (`CLocalNav`), `as_*`/`es_*` VIP, HLTV proxy (`cs-hltv`), Master Server (`cs-master`), HLDEMO v5 `.dem` recording/playback, and 3-way Steam Voice `OPUS_PLC <-> CSVO ADPCM` bridging.
+- **100.0% Parity & Two-Way Protocol 48 Interoperability:** Retail Steam `hl.exe` connects to `cs-server`, and `cs-client` connects to retail `hlds.exe` (Steam Build 10210). Full `de_*` Bomb/Defusal, `cs_*` Hostage Rescue (`CLocalNav`), `as_*`/`es_*` VIP, HLTV proxy (`cs-hltv`), Master Server (`cs-master`), HLDEMO v5 `.dem` recording/playback, pure-Rust **HTTP/3 WebTransport datagrams** (`--webtransport-port`), and 3-way Steam Voice `OPUS_PLC <-> CSVO ADPCM` bridging.
 - **Authentic Steam Build 10210 Feel:** Shared `pm_shared` movement (`cs-pm`), all 28 weapons + Tactical Shield with ReGameDLL `KickBack` recoil, `160/160` map entity classes across all 25 stock maps, `735/735` vanilla CVars & console commands (including `wait` scripting and scroll-wheel bhop/duck impulse latching), VGUI2 `.res` & `TrackerScheme.res`/`ClientScheme.res` UI, `sniper_scope.spr`, `net_graph 1/2/3`, `cl_shadows 1`, `cl_minmodels 1`, and ZBot `.nav` AI with automatic BSP navmesh generation.
-- **Browser PWA & 1-Click WebRTC P2P Rooms:** Full `wasm32-unknown-unknown` client running on WebGPU or WebGL2 (`https://maybewewill.github.io/cs16-rs/`). Mount your local Half-Life folder into browser IndexedDB (zero files uploaded), play offline 5v5 against ZBots, host a 1-click WebRTC DataChannel P2P room, or join any `wss://` server.
-- **5-Language Sandboxed Modding Platform (ABI v2):** Run **Python 3** (zero-compile, `< 5 ms` live hot-reload), **Rust**, **C++20**, **Go/WASI**, and legacy **AMX Mod X (`.amxx` Pawn 3.2)** plugins side-by-side on the same 100 Hz server. Includes ReAPI `Pre`/`Post` hooks, 1-line `vfx_*`, paginated menus, bilingual `en`/`ru` `i18n`, RBAC admins, synchronous polyglot RPC, `< 10 ms` offline black-box crash replay (`cargo xtask mod replay`), and a 5-second legacy AMXX migrator (`--import-amxx`).
-- **Built-In Server Operations:** Single-binary `cs-server` (`--admin`, `--embed-web`), official Docker image (`ghcr.io/maybewewill/cs16-rs`), and a Steam-2003 VGUI2 **Web Admin Panel (`/admin`)** with RCON terminal, live player/bot controls, match stats leaderboard, **10 Hz 2D HLTV-style Round Replay Viewer**, and **Mods & ResMon Studio** (live per-plugin CPU bars + browser editor).
+- **1-Click Browser Instant Demo, WebGPU PWA & WebRTC P2P:** Full `wasm32-unknown-unknown` client (`4.67 MiB` gzipped) running on WebGPU or WebGL2 (`https://maybewewill.github.io/cs16-rs/`). Jump straight into the clean-room `dm_rusthouse` 5v5 Instant Demo in `< 150 ms` with **zero Steam files**, or mount your local Half-Life folder into IndexedDB (zero files uploaded) to play retail maps offline, host a 1-click WebRTC P2P room, or join any `wss://` / HTTP/3 WebTransport server.
+- **5-Language Sandboxed Modding Platform (ABI v2):** Run **Python 3** (zero-compile, `< 5 ms` live hot-reload), **Rust** (zero-`unsafe` `cs16_wasm_exports!`), **C++20**, **Go/WASI**, and legacy **AMX Mod X (`.amxx` Pawn 3.2)** plugins side-by-side on the same 100 Hz server. Includes ReAPI `Pre`/`Post` hooks, 1-line `vfx_*`, paginated menus, bilingual `en`/`ru` `i18n`, RBAC admins, synchronous polyglot RPC, `< 10 ms` offline black-box crash replay (`cargo xtask mod replay`), and a 5-second legacy AMXX migrator (`--import-amxx`).
+- **Built-In Server Operations:** Single-binary `cs-server` (`15.87 MiB`, `--admin`, `--embed-web`, `--webtransport-port`), official Docker image (`ghcr.io/maybewewill/cs16-rs`), and a Steam-2003 VGUI2 **Web Admin Panel (`/admin`)** with RCON terminal, live player/bot controls, match stats leaderboard, **10 Hz 2D HLTV-style Round Replay Viewer**, and **Mods & ResMon Studio** (live per-plugin CPU bars + browser editor).
 - **Opt-In "Beyond 1.6" Practice, Scrim & KZ Suite:** Wallbang & nade trajectory lab (`sv_showimpacts`, `sv_grenade_trajectory`, `rethrow`), competitive scrim commands (`lo3`, `mp_knife_round`, `sv_damage_print`), built-in KZ checkpoints & `+32 u` LongJump stats (`sv_kz_mode`, `cl_ljstats`), and spectator `spec_xray` / `spec_hud_bars` — all disabled (`0`) by default so retail behavior stays untouched.
 
 ---
 
 ## Performance & Rewrite Advantages
 
-All Phase 16 benchmarks below were measured deterministically on real Steam `de_dust2` assets (NVIDIA GeForce RTX 5070 Laptop GPU / Vulkan, unoptimized `dev` profile via `cargo xtask bench --suite all --gpu`; `[profile.release]` further enables `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`). See the full technical breakdown in [`docs/REWRITE_ADVANTAGES.md`](docs/REWRITE_ADVANTAGES.md).
+Measured back-to-back on identical hardware (Windows 11 `x86_64`, NVIDIA GeForce RTX 5070 Laptop GPU / Vulkan, Rust `1.100.0`) using real Steam `de_dust2` assets against live retail Steam **`hlds.exe` Build 10210** (`1.1.2.7`) and `cargo xtask bench --suite all --gpu` (`[profile.release]`: `opt-level = 3`, `lto = "thin"`, `codegen-units = 1`, `strip = "symbols"`). Full methodology and raw JSON outputs live in [`docs/REWRITE_ADVANTAGES.md`](docs/REWRITE_ADVANTAGES.md).
 
-### Legacy GoldSrc (C/C++) vs `cs16-rs` (Safe Rust)
+### 3-Way Measured Comparison: Retail GoldSrc vs `cs16-rs` (`dev`) vs `cs16-rs` (`--release` LTO)
 
-| Dimension | Legacy GoldSrc (`hl.exe` / `hlds.exe` / Metamod) | `cs16-rs` (Safe Rust) |
-|---|---|---|
-| **Memory & Security Safety** | Unmanaged C/C++; decades of buffer overflows, arbitrary file writes, and slowhack CVars | **`0 unsafe` blocks** across all 27 crates (321K LOC), `#![forbid(unsafe_code)]`, `cl_filterstuffcmd` enforcement, constant-time admin auth |
-| **Rendering Pipeline** | 1998 OpenGL 1.1 fixed-function (`glBegin`/`glEnd`), CPU bone skinning, 1 draw call per smoke puff | `wgpu 30` (Vulkan / DX12 / Metal / WebGPU / WebGL2), GPU `.mdl` skinning (`<= 6 KiB` UBO), cached `GammaTables`, **1-draw-call smoke batching** (`45 -> 1` draw calls), **-95.9%** upload traffic (`1,825 -> 75 KiB/frame`) |
-| **Headless GPU Frame Time (`de_dust2`, 16 MDL + 45 smokes)** | Legacy single-threaded GL driver overhead | **`13.82 ms -> 1.88 ms`** (**7.35x** Phase 16 speedup; **`532 FPS` in unoptimized `dev`**) with **`(-0.4, -0.8, +0.0)` RGB parity** vs retail CS 1.6 |
-| **Protocol 48 Wire Delta Codec** | Pointer-driven C struct reflection | Zero-alloc `CompiledPlan` + stack `u64` bitmask: **`15,604 -> 3,422 ns/op`** (**4.56x**, **`292,197 entities/sec`** in `dev`, **0 B wire diff**) |
-| **Server Startup & 32-Player Tick** | Multi-second map + bot init; single-threaded snapshot encoding | **`228.6 ms` cold startup** on 32p `de_dust2` + 31 ZBots; **`1.02 ms` avg / `1.87 ms` p99 tick** (`dev`); bit-packed `u64` PVS + deterministic multi-core snapshot compression |
-| **Audio & Input Latency** | Shared-lock mixer; OS swapchain buffering | Lock-free audio thread + signon WAV warmup (`0.00 ms` round-1 hitch); `gl_vsync 0` + `gl_lowlatency 1`; **`416 -> 306 us`** client CPU (**1.36x**) |
-| **Modding & Crash Isolation** | Native C++ `.dll`/`.so` + Pawn; one null deref crashes the whole server | Sandboxed **Rust, C++20, Go, Python 3, `.amxx`** with fuel/memory caps, `< 5 ms` live hot-reload, and `< 10 ms` offline `ModFaultDump` replay |
-| **Platforms & Distribution** | x86 Windows / 32-bit Linux only | Windows x86_64, Linux / Steam Deck x86_64, macOS Apple Silicon, **Browser PWA (WebGPU/WebGL2 + WebRTC P2P)**, Docker (`ghcr.io`) |
+| Metric (`de_dust2`, identical hardware) | Retail Steam GoldSrc (`hlds.exe` Build 10210, C/C++) | `cs16-rs` (`dev`, `opt-level = 0`) | `cs16-rs` (`--release` LTO, `opt-level = 3`) | `--release` Advantage |
+|---|---:|---:|---:|---|
+| **Cold Server Startup -> `A2S_INFO`** *(32p, median of 3)* | `324.28 ms` (0 bots) | — | **`152.41 ms`** (0 bots) / **`156.92 ms`** (31 ZBots) | **2.13x faster** vs `hlds.exe` (`1.68x` w/ 9 mods) |
+| **32-Player Server RAM (WS / Private)** | `89.93 / 80.64 MiB` idle<br>`110.44 / 101.09 MiB` (1 player) | — | **`77.34 / 72.12 MiB`** idle<br>**`77.52 / 72.25 MiB`** (**31 ZBots**) | **-14.0%** idle / **-29.8%** vs 1p `hlds.exe`<br>(`97.20 MiB` even w/ 32p + 9 WASM/Py mods) |
+| **32p + 31 ZBots Tick Time & Ceiling** | `97.81 Hz` default<br>`646.12 Hz` uncapped *(0 bots idle)* | `1.1811 ms` avg (`847 Hz`)<br>`2.3925 ms` p99 | **`0.3991 ms` avg (`2,506 Hz`)**<br>**`0.7627 ms` p99** (`62.8 ms` init) | **2.96x** vs `dev` / **3.88x** ceiling vs 0-bot `hlds.exe` |
+| **Protocol 48 Delta Codec (`100k` ops)** | Pointer-based C reflection | `3,696.00 ns/op`<br>`270,563 ent/s` | **`770.99 ns/op`** (`155 ns` decode)<br>**`1,297,035 entities/sec`** | **4.79x** vs `dev` (**9.09x** decode, **0 B** wire diff) |
+| **Client CPU (`32p, 64 TE, 24 decals`)** | Single-threaded legacy loop | `408.82 us` avg (`2,446 FPS`)<br>`445.60 us` p99 | **`36.78 us` avg (`27,189 FPS` ceiling)**<br>**`44.00 us` p99** | **11.12x faster** (`-91.0%`) vs `dev` |
+| **Headless Vulkan GPU (`1280×800`, 16 MDL + 45 smokes)** | OpenGL 1.1 (`45` smoke DCs, CPU skin) | `2.2163 ms` (`451.2 FPS`)<br>`67` DCs, `74.85 KiB` upload | **`0.4098 ms` (`2,440.2 FPS`)**<br>**`67` DCs (`1` smoke), `74.85 KiB` upload** | **5.41x** vs `dev` / **33.7x** vs pre-Phase 16<br>`(-0.4, -0.8, +0.0)` RGB parity (**PASS**) |
+| **Memory & Plugin Safety** | Unmanaged C/C++; native DLL crashes kill server | `0 unsafe` across 27 crates | **`0 unsafe` (`#![forbid(unsafe_code)]`)**, ~330K LOC | Sandboxed 5-lang mods + `< 10 ms` crash replay |
+
+### Footprint & Efficiency Summary (`--release` LTO)
+
+| Artifact / Runtime | Measured Size / Metric | Comparison |
+|---|---:|---|
+| **`cs-server.exe`** *(stripped x86_64)* | **`15.87 MiB`** (`16,635,904 B`) | **-46.8%** vs `29.83 MiB` across `12` loaded retail `hlds.exe` + Steam runtime DLLs; includes ZBots, Web Admin, WebTransport & 5-lang mods |
+| **`cs-client.exe`** *(stripped x86_64)* | **`26.61 MiB`** (`27,900,416 B`) | Single standalone `wgpu` Vulkan/DX12 client + VGUI2 + audio + listen server + `dm_rusthouse` |
+| **`cs-hltv` / `cs-probe` / `cs-master` / `cs-relay`** | **`1.76` / `1.56` / `1.14` / `1.13 MiB`** | Compact zero-dependency infrastructure utilities |
+| **Browser PWA `cs_web_bg.wasm`** | **`14.64 MiB` raw / `4.67 MiB` (`4,785.6 KiB`) `gzip -9`** | Complete engine + renderer + ZBot AI + clean-room `dm_rusthouse` Instant Demo booting in **`< 150 ms`** |
 
 ---
 
 ## Quick Start
 
-> **Assets notice:** Zero Valve assets are stored in this repository. `cs16-rs` mounts your existing Steam Half-Life / Counter-Strike 1.6 folder (`cstrike`, `valve`, `platform`, optional `cstrike_hd`) **read-only** at runtime (auto-discovered via Steam `libraryfolders.vdf`, or set via `--gamedir` / `CS16_GAMEDIR`).
+> **Zero-Friction Demo & Assets Notice:** Zero Valve assets are stored in this repository. Use **`--demo`** (or click **Play Instant Demo** in the browser) to jump into `dm_rusthouse` immediately with zero external files. For full retail CS 1.6, `cs16-rs` mounts your existing Steam Half-Life folder (`cstrike`, `valve`, `platform`, optional `cstrike_hd`) **read-only** at runtime (auto-discovered via Steam `libraryfolders.vdf`, or set via `--gamedir` / `CS16_GAMEDIR`).
 
-### 1. Play Native (Offline 5v5 or Multiplayer)
+### 1. Play Native (Instant Demo, Offline 5v5, or Multiplayer)
 
 Download a prebuilt archive from [GitHub Releases](https://github.com/maybewewill/cs16-rs/releases), or build from source (Rust `1.100.0` pinned via `rust-toolchain.toml`):
 
 ```bash
-# Launch desktop client (auto-discovers Steam Half-Life install)
+# Instant 5v5 Demo on clean-room dm_rusthouse (no Steam files required!)
+cargo run --release -p cs-client -- --demo
+
+# Launch desktop client with auto-discovered Steam Half-Life assets
 cargo run --release -p cs-client
 
 # Jump directly into de_dust2 with classic net_graph 1
@@ -89,15 +104,16 @@ cargo run --release -p cs-client -- --map de_dust2 --exec "net_graph 1"
 cargo run --release -p cs-client -- --exec "connect 127.0.0.1:27015"
 ```
 
-### 2. Play Directly in the Browser (WebGPU / WebGL2 PWA)
+### 2. Play Directly in the Browser (Instant Demo & WebGPU/WebGL2 PWA)
 
-- **Instant Hosted Launcher:** Open **[https://maybewewill.github.io/cs16-rs/](https://maybewewill.github.io/cs16-rs/)** in Chrome, Edge, or Firefox -> mount your local `Half-Life` folder (cached locally in IndexedDB, never uploaded) -> click **Offline 5v5** or **Host P2P Room**.
-- **Self-Hosted Web + Admin Server:**
+- **1-Click Hosted Launcher:** Open **[https://maybewewill.github.io/cs16-rs/](https://maybewewill.github.io/cs16-rs/)** in Chrome, Edge, or Firefox -> click **▶ Play Instant Demo** to play 5v5 bots on `dm_rusthouse` immediately, OR mount your local `Half-Life` folder (cached in IndexedDB, never uploaded) for full retail maps, **Offline 5v5**, or **Host P2P Room**.
+- **Self-Hosted Web + HTTP/3 WebTransport + Admin Server:**
 
 ```bash
 cargo xtask web-build --release
 cargo run --release -p cs-server -- \
-  --map de_dust2 --port 27015 --web-port 27016 --web-dir dist/web --admin --bots 9
+  --map de_dust2 --port 27015 --web-port 27016 --webtransport-port 27017 \
+  --web-dir dist/web --admin --bots 9
 ```
 
 Open `http://127.0.0.1:27016/` to play in the browser, or `http://127.0.0.1:27016/admin` for the Web Admin Panel & ResMon Studio (authenticate with `rcon_password`). Add `--embed-web` to serve the launcher & admin UI directly from the single `cs-server` binary with no external `web/` directory.
@@ -261,10 +277,10 @@ flowchart TD
 |---|---|
 | `cs-vfs` | Case-insensitive layered GoldSrc VFS (`mods/` -> `cstrike_downloads` -> `cstrike_hd` -> `cstrike` -> `valve` -> `platform`) + Steam auto-discovery & browser memory layers |
 | `cs-cvar` | GoldSrc console & CVar engine (`735/735` parity): `bind`, `alias`, frame-deferred `wait`, `bindtoggle`, `incrementvar`, `FCVAR_*`, `config.cfg` |
-| `cs-assets` | Pure-Rust parsers for `BSP v30`, `WAD3`, `MDL v10`, `SPR v2`, `.nav` v1–v5, `HPAK` sprays, `TrackerScheme`/`ClientScheme`, `.res`, `.scr`, UTF-16LE localization, overviews |
+| `cs-assets` | Pure-Rust parsers for `BSP v30`, `WAD3`, `MDL v10`, `SPR v2`, `.nav` v1–v5, `HPAK` sprays, `TrackerScheme`/`ClientScheme`, `.res`, `.scr`, UTF-16LE localization, overviews + clean-room `dm_rusthouse` Instant Demo builder |
 | `cs-proto48` | GoldSrc Protocol 48 wire framing, NetChan, precompiled `CompiledPlan` delta codec, user messages, HLDEMO v5 `.dem` |
 | `cs-platform` | Native & `wasm32` clock, config storage, and XDG `nav_cache/` seams |
-| `cs-transport` | Unified `PacketTransport` for UDP, loopback, `MultiPeerChannel` (WebRTC P2P), and pure-Rust RFC 6455 WebSocket + HTTP/1.1 |
+| `cs-transport` | Unified `PacketTransport` for UDP, loopback, `MultiPeerChannel` (WebRTC P2P), pure-Rust HTTP/3 WebTransport datagrams (`quinn`/`rustls`), and RFC 6455 WebSocket + HTTP/1.1 |
 | `cs-relay` | Hardened allowlisted WebSocket-to-UDP Protocol 48 proxy with rate limits & packet validation |
 | `cs-pm` | Shared `pm_shared` movement physics, BSP/box hull collision, `PM_TraceTexture` footsteps, `visents` boost traces, KZ/LJ jump tracker |
 | `cs-engine` | 100 Hz Protocol 48 server engine: PVS/PAS bitsets, persistent `StudioCache`, parallel snapshot compression, RCON, bans, `dlfile`, HL logs |
@@ -272,7 +288,7 @@ flowchart TD
 | `cs-game` | CS 1.6 `mp.dll` rules: all 28 weapons + shield, `160/160` entities, `de_*`/`cs_*`/`as_*`/`es_*`, ReAPI hook dispatch, Beyond 1.6 modes |
 | `cs-sim` | Legacy deterministic simulation helpers & `WalkGame` test harness |
 | `cs-local` | In-process loopback + multi-peer listen server bridging `cs-engine`/`cs-game` with `cs-client` and `cs-web` |
-| `cs-server` | Standalone 100 Hz dedicated server (`--web-port`, `--admin`, `--embed-web`, `--plugins-toml`, `--import-amxx`, 2D replays, Steam Voice bridge) |
+| `cs-server` | Standalone 100 Hz dedicated server (`--web-port`, `--webtransport-port`, `--demo`, `--admin`, `--embed-web`, `--plugins-toml`, `--import-amxx`, 2D replays, Steam Voice bridge) |
 | `cs-master` | GoldSrc `0x31` master server, HTTP `/servers`, and `/lobbies` WebRTC signaling directory |
 | `cs-hltv` | Protocol 48 time-delay HLTV proxy, `DRC_CMD_*` auto-director, `.dem` recorder |
 | `cs-amxx` | Pure-Rust Pawn 3.2 `.amxx` bytecode VM & `cstrike`/`fun`/`engine`/`fakemeta`/`hamsandwich`/`csx`/`nvault`/`newmenus`/`lang`/ReAPI natives |
@@ -309,23 +325,23 @@ flowchart TD
 
 Tracked honestly across 15 TOML ledgers via `cargo run -p xtask -- parity`:
 
-- **Implemented:** **`99.7%`** (`1,782 / 1,783` tracked items across bots, cvars, delta, engine, entities, mods, movement, render, sound, tempents, ui, usermsg, weapons, web, wire; the single remaining `missing` item is server-side HTTP/3 WebTransport datagrams — browser clients fall back seamlessly to WebSocket).
-- **Automated Test Coverage:** **`96.3%`** (`2,150+` passing workspace tests, zero warnings across `clippy --workspace --all-targets -- -D warnings`, full `wasm32-unknown-unknown` clean check).
-- **Live Steam Build 10210 `hlds.exe` Differential Verification:** Verified `cs_office` (`218/218` edicts), `de_dust2` (`51/51` edicts, C4 plant/drop), `as_oilrig` (VIP), 25-map baseline audit (`24/25` exact), 65 s `cs-pm` movement trace (`0.00446 u` mean error), and headless `de_dust2` RGB visual parity (`(-0.4, -0.8, +0.0)` vs retail `(113, 96, 65) +/- 4`). Manual owner live-play sign-off checklists live in [`docs/parity/checklists/`](docs/parity/checklists/).
+- **Implemented:** **`100.0%`** (`1,783 / 1,783` tracked items across bots, cvars, delta, engine, entities, mods, movement, render, sound, tempents, ui, usermsg, weapons, web, wire — **`0` missing items**).
+- **Automated Test Coverage:** **`96.6%`** (`2,200+` passing workspace tests, zero warnings across `clippy --workspace --all-targets -- -D warnings`, full `wasm32-unknown-unknown` clean check).
+- **Live Steam Build 10210 `hlds.exe` Differential Verification:** Verified `cs_office` (`218/218` edicts), `de_dust2` (`51/51` edicts, C4 plant/drop), `as_oilrig` (VIP), 25-map baseline audit (`24/25` exact), 65 s `cs-pm` movement trace (`0.00446 u` mean error), live head-to-head `hlds.exe` Build 10210 startup/RAM/tick/interop audit, and headless `--release` LTO `de_dust2` RGB visual parity (`(-0.4, -0.8, +0.0)` vs retail `(113, 96, 65) +/- 4`). Manual owner live-play sign-off checklists live in [`docs/parity/checklists/`](docs/parity/checklists/).
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p xtask -- parity
-cargo run -p xtask -- bench --suite all --gpu
+cargo run --release -p xtask -- bench --suite all --gpu
 ```
 
 ---
 
 ## Documentation & Licensing
 
-- [`docs/REWRITE_ADVANTAGES.md`](docs/REWRITE_ADVANTAGES.md) — Quantitative C/C++ GoldSrc vs Safe Rust architecture & benchmark report
+- [`docs/REWRITE_ADVANTAGES.md`](docs/REWRITE_ADVANTAGES.md) — Quantitative C/C++ GoldSrc (`hlds.exe` Build 10210) vs Safe Rust (`dev` & `--release` LTO) architecture & benchmark report
 - [`docs/MODDING.md`](docs/MODDING.md) — 5-language modding guide (Python 3, Rust, C++20, Go/WASI, AMX Mod X)
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — Dedicated server, Docker, TLS, Web Admin API & 2D replay guide
-- [`CHANGELOG.md`](CHANGELOG.md) — Release notes (`v0.2.0`)
+- [`CHANGELOG.md`](CHANGELOG.md) — Release notes (`v0.3.0`)
 - [`docs/LICENSING.md`](docs/LICENSING.md) & [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) — **GPL-3.0-or-later** license and upstream reference attribution (`ReHLDS`, `ReGameDLL_CS`, `Xash3D FWGS`, `cs16-client`, `AMX Mod X`, `ReAPI`)

@@ -11,6 +11,8 @@ Thumbs.db
 !.github/assets/
 !.github/assets/*.png
 !.github/assets/*.jpg
+!.github/assets/*.gif
+!.github/assets/*.webp
 !.github/assets/*.ico
 !web/icons/
 !web/icons/*.png

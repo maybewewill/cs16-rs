@@ -182,8 +182,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<VisualDiffConfig, St
             }
             "--out" => cfg.out_dir = PathBuf::from(it.next().ok_or("--out needs a value")?),
             "--reference-dir" => {
-                cfg.reference_dir =
-                    Some(PathBuf::from(it.next().ok_or("--reference-dir needs a value")?));
+                cfg.reference_dir = Some(PathBuf::from(
+                    it.next().ok_or("--reference-dir needs a value")?,
+                ));
             }
             "--resolution" => {
                 cfg.resolution = it.next().ok_or("--resolution needs a value")?;
@@ -203,8 +204,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<VisualDiffConfig, St
 }
 
 fn binary_path(name: &str) -> PathBuf {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     PathBuf::from("target")
-        .join("debug")
+        .join(profile)
         .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
@@ -213,16 +219,23 @@ fn ensure_binaries(force: bool) -> Result<(PathBuf, PathBuf), String> {
     let cli = binary_path("cs-client");
     if force || !srv.exists() || !cli.exists() {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let status = Command::new(cargo)
-            .args(["build", "-p", "cs-server", "-p", "cs-client"])
+        let mut cmd = Command::new(cargo);
+        cmd.arg("build");
+        if !cfg!(debug_assertions) {
+            cmd.arg("--release");
+        }
+        let status = cmd
+            .args(["-p", "cs-server", "-p", "cs-client"])
             .status()
             .map_err(|e| format!("failed to build cs-server/cs-client: {e}"))?;
         if !status.success() {
-            return Err(format!("cargo build -p cs-server -p cs-client failed ({status})"));
+            return Err(format!(
+                "cargo build -p cs-server -p cs-client failed ({status})"
+            ));
         }
     }
     if !srv.exists() || !cli.exists() {
-        return Err("expected debug binaries missing after build".into());
+        return Err("expected binaries missing after build".into());
     }
     Ok((srv, cli))
 }
@@ -235,8 +248,8 @@ pub fn run_visual_diff(args: impl Iterator<Item = String>) -> Result<ExitCode, S
         .map_err(|e| format!("cannot create {}: {e}", cfg.out_dir.display()))?;
 
     let srv_log = cfg.out_dir.join("server.log");
-    let srv_out = File::create(&srv_log)
-        .map_err(|e| format!("cannot create {}: {e}", srv_log.display()))?;
+    let srv_out =
+        File::create(&srv_log).map_err(|e| format!("cannot create {}: {e}", srv_log.display()))?;
     let srv_err = srv_out
         .try_clone()
         .map_err(|e| format!("cannot clone server log handle: {e}"))?;
@@ -253,15 +266,16 @@ pub fn run_visual_diff(args: impl Iterator<Item = String>) -> Result<ExitCode, S
     std::thread::sleep(Duration::from_millis(900));
 
     let shot_path = cfg.out_dir.join("ours_cam1.png");
-    let mut script = "gamma 2.5; texgamma 2.0; lightgamma 2.5; gl_overbright 0; gl_ansio 1; ".to_string();
+    let mut script =
+        "gamma 2.5; texgamma 2.0; lightgamma 2.5; gl_overbright 0; gl_ansio 1; ".to_string();
     if let Some(b) = cfg.brightness {
         let _ = write!(script, "brightness {b:.3}; ");
     }
     let _ = write!(script, "connect 127.0.0.1:{}", cfg.port);
 
     let cli_log = cfg.out_dir.join("client.log");
-    let cli_out = File::create(&cli_log)
-        .map_err(|e| format!("cannot create {}: {e}", cli_log.display()))?;
+    let cli_out =
+        File::create(&cli_log).map_err(|e| format!("cannot create {}: {e}", cli_log.display()))?;
     let cli_err = cli_out
         .try_clone()
         .map_err(|e| format!("cannot clone client log handle: {e}"))?;
@@ -448,7 +462,15 @@ mod tests {
         assert!((st.mean_rgb[0] - 114.0).abs() < 1e-6);
         assert!((st.mean_rgb[1] - 95.0).abs() < 1e-6);
         assert!((st.mean_rgb[2] - 67.0).abs() < 1e-6);
-        assert!(within_rgb_tolerance(st.mean_rgb, ORIG_RIGHT_WALL_RGB, RIGHT_WALL_TOLERANCE));
-        assert!(!within_rgb_tolerance([120.0, 96.0, 65.0], ORIG_RIGHT_WALL_RGB, RIGHT_WALL_TOLERANCE));
+        assert!(within_rgb_tolerance(
+            st.mean_rgb,
+            ORIG_RIGHT_WALL_RGB,
+            RIGHT_WALL_TOLERANCE
+        ));
+        assert!(!within_rgb_tolerance(
+            [120.0, 96.0, 65.0],
+            ORIG_RIGHT_WALL_RGB,
+            RIGHT_WALL_TOLERANCE
+        ));
     }
 }

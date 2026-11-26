@@ -32,7 +32,9 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = Cs16App::new(launch);
-    event_loop.run_app(&mut app).expect("run cs16-rs event loop");
+    event_loop
+        .run_app(&mut app)
+        .expect("run cs16-rs event loop");
 }
 
 fn parse_args() -> LaunchConfig {
@@ -138,6 +140,30 @@ pub(crate) fn parse_args_from<I: IntoIterator<Item = String>>(iter: I) -> Launch
                     i += 1;
                 }
             }
+            "--record-dir" => {
+                if let Some(val) = args.get(i + 1) {
+                    cfg.record_dir = Some(PathBuf::from(val));
+                    i += 1;
+                }
+            }
+            "--record-frames" => {
+                if let Some(val) = args.get(i + 1)
+                    && let Ok(frames) = val.parse::<u32>()
+                {
+                    cfg.record_frames = frames;
+                    i += 1;
+                }
+            }
+            "--record-fps" => {
+                if let Some(val) = args.get(i + 1)
+                    && let Ok(fps) = val.parse::<f32>()
+                    && fps.is_finite()
+                    && fps > 0.0
+                {
+                    cfg.record_fps = fps.clamp(1.0, 120.0);
+                    i += 1;
+                }
+            }
             plus if plus.starts_with('+') && plus.len() > 1 => {
                 let mut parts = vec![&plus[1..]];
                 while let Some(next) = args.get(i + 1) {
@@ -188,7 +214,10 @@ mod tests {
         ]);
         assert!(cfg.headless);
         assert_eq!((cfg.width, cfg.height), (1280, 720));
-        assert_eq!(cfg.startup_exec, ["connect 127.0.0.1:27015", "brightness 1.0"]);
+        assert_eq!(
+            cfg.startup_exec,
+            ["connect 127.0.0.1:27015", "brightness 1.0"]
+        );
         assert_eq!(cfg.wait_camera, 2);
         assert_eq!(cfg.wait_seconds, Some(1.5));
         assert_eq!(cfg.auto_screenshot, Some(PathBuf::from("out.png")));
@@ -215,9 +244,18 @@ mod tests {
             "--headless".to_string(),
             "--screenshot".to_string(),
             "demo.png".to_string(),
+            "--record-dir".to_string(),
+            "frames".to_string(),
+            "--record-frames".to_string(),
+            "72".to_string(),
+            "--record-fps".to_string(),
+            "24".to_string(),
         ]);
         assert!(demo_cfg.demo);
         assert!(demo_cfg.headless);
         assert_eq!(demo_cfg.auto_screenshot, Some(PathBuf::from("demo.png")));
+        assert_eq!(demo_cfg.record_dir, Some(PathBuf::from("frames")));
+        assert_eq!(demo_cfg.record_frames, 72);
+        assert!((demo_cfg.record_fps - 24.0).abs() < 1e-6);
     }
 }

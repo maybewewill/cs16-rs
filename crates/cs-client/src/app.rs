@@ -50,7 +50,6 @@ use cs_client::ui::hud::{
     PickupKind, compute_hud_visibility, draw_cs16_hud_with_runtime, draw_voice_speakers,
 };
 use cs_client::ui::hud_extras::{OverviewMapTex, WeaponBucketState, draw_overview_map};
-use cs_pm::collision::Hull;
 use cs_client::ui::main_menu::{MainMenuRenderCtx, MainMenuUi};
 use cs_client::ui::mod_hud::{draw_mod_approval_prompt, draw_mod_hud};
 use cs_client::ui::options::{OptionsRenderCtx, OptionsUi};
@@ -65,9 +64,9 @@ use cs_client::ui::server_menu::{
     draw_styled_text_menu_vgui, draw_text_menu_vgui, menu_key_enabled,
     menu_styled_lines_with_titles,
 };
-use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
 use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme, paint_vgui_bevel};
+use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::{
     CrosshairInputs, CrosshairState, FrameTelemetry, KeyDisplayState, draw_crosshair_vgui,
     draw_ljstats, draw_net_graph_with_telemetry, draw_r_speeds, draw_showkeys, draw_showpos,
@@ -75,6 +74,7 @@ use cs_client::ui::{
 };
 use cs_client::view::{FrameView, ViewInputs, ViewStats};
 use cs_client::view_effects::{calc_view_idle, calc_viewmodel_angles};
+use cs_pm::collision::Hull;
 
 const MAX_FEED: usize = 5;
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon-64.png");
@@ -104,6 +104,9 @@ pub struct LaunchConfig {
     pub height: u32,
     pub wait_camera: u32,
     pub wait_seconds: Option<f32>,
+    pub record_dir: Option<PathBuf>,
+    pub record_frames: u32,
+    pub record_fps: f32,
 }
 
 impl Default for LaunchConfig {
@@ -121,6 +124,9 @@ impl Default for LaunchConfig {
             height: 720,
             wait_camera: 1,
             wait_seconds: None,
+            record_dir: None,
+            record_frames: 0,
+            record_fps: 24.0,
         }
     }
 }
@@ -165,7 +171,11 @@ impl HudFeeds {
         let notify_life = feed_life.max(0.5);
         self.notify.retain(|(_, t)| now - t < notify_life);
         self.pickups.retain(|e| now < e.end_time);
-        if self.center.as_ref().is_some_and(|(_, t)| now - t > center_life) {
+        if self
+            .center
+            .as_ref()
+            .is_some_and(|(_, t)| now - t > center_life)
+        {
             self.center = None;
         }
     }
@@ -233,6 +243,8 @@ pub struct Cs16App {
     frame_count: u64,
     pending_screenshot: Option<PathBuf>,
     exit_after_screenshot: bool,
+    recorded_frames: u32,
+    headless_fixed_dt: Option<f32>,
     config_path: PathBuf,
     recording_demo: Option<String>,
     pending_rcon: Option<PendingRcon>,
@@ -444,6 +456,8 @@ impl Cs16App {
             frame_count: 0,
             pending_screenshot: None,
             exit_after_screenshot,
+            recorded_frames: 0,
+            headless_fixed_dt: None,
             config_path,
             recording_demo: None,
             pending_rcon: None,
@@ -736,10 +750,12 @@ impl Cs16App {
     }
 
     fn start_local_map(&mut self, map_name: &str) {
-        self.cvars.info(format!("Starting local game on \"{map_name}\"..."));
+        self.cvars
+            .info(format!("Starting local game on \"{map_name}\"..."));
         self.end_session();
         let Some(vfs) = self.vfs.clone() else {
-            self.cvars.error("Half-Life / CS 1.6 directory not mounted.");
+            self.cvars
+                .error("Half-Life / CS 1.6 directory not mounted.");
             return;
         };
         let opts = LocalOptions {
@@ -795,7 +811,8 @@ impl Cs16App {
                 }
                 if let Err(err) = self.load_map(map_name) {
                     error!(map = map_name, %err, "Failed to load BSP map");
-                    self.cvars.error(format!("Failed to load map \"{map_name}\": {err}"));
+                    self.cvars
+                        .error(format!("Failed to load map \"{map_name}\": {err}"));
                     self.end_session();
                     return;
                 }
@@ -803,7 +820,8 @@ impl Cs16App {
             }
             Err(err) => {
                 error!(map = map_name, %err, "Failed to start the local game");
-                self.cvars.error(format!("Failed to start \"{map_name}\": {err}"));
+                self.cvars
+                    .error(format!("Failed to start \"{map_name}\": {err}"));
             }
         }
     }
@@ -820,7 +838,9 @@ impl Cs16App {
                 self.menu_ui.find_servers_open = false;
                 self.after_session_start();
             }
-            Err(err) => self.cvars.error(format!("Failed to connect to {addr}: {err}")),
+            Err(err) => self
+                .cvars
+                .error(format!("Failed to connect to {addr}: {err}")),
         }
     }
 
@@ -1010,7 +1030,8 @@ impl Cs16App {
             if let SoundCommand::RoomType(rt) = &cmd {
                 self.cvars.set("room_type", rt.to_string());
             }
-            self.audio.handle_sound_command(self.vfs.as_ref(), &cmd, occ_ref);
+            self.audio
+                .handle_sound_command(self.vfs.as_ref(), &cmd, occ_ref);
         }
         for impact in &self.frame_view.impact_sounds {
             self.audio.handle_sound_command(
@@ -1090,10 +1111,14 @@ impl Cs16App {
                 for wid in hud.weapon_pickups.drain(..) {
                     let empty = matches!(hud.clips.get(&wid), Some(&0))
                         && hud.weapons.get(&wid).is_some_and(|w| {
-                            w.ammo1_type != 255 && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
+                            w.ammo1_type != 255
+                                && hud.ammo.get(&w.ammo1_type).copied().unwrap_or(0) == 0
                         });
                     feeds.pickups.push(PickupHistoryEntry {
-                        kind: PickupKind::Weapon { weapon_id: wid, empty },
+                        kind: PickupKind::Weapon {
+                            weapon_id: wid,
+                            empty,
+                        },
                         end_time: now + 5.0,
                     });
                 }
@@ -1389,7 +1414,8 @@ impl Cs16App {
                         }
                     }
                     EngineAction::SetPos(_) => {
-                        self.cvars.warn("setpos needs the server's cheats; use noclip");
+                        self.cvars
+                            .warn("setpos needs the server's cheats; use noclip");
                     }
                     // The server console of a local game.
                     EngineAction::RestartRound => self.server_console("sv_restart 1"),
@@ -1406,7 +1432,8 @@ impl Cs16App {
                             .play_2d(self.vfs.as_ref(), &sample, volume * master);
                     }
                     EngineAction::SpeakSentence(spec) => {
-                        let suit = finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
+                        let suit =
+                            finite_or(self.cvars.get_f32("suitvolume"), 0.25).clamp(0.0, 1.0);
                         self.audio.play_sentence(self.vfs.as_ref(), &spec, suit);
                     }
                     EngineAction::StopSound => self.audio.stop_all(),
@@ -1449,7 +1476,8 @@ impl Cs16App {
                         let next = SpectatorMode::from_i32(mode);
                         self.spectator_ui.mode = next;
                         if self.is_in_game() {
-                            self.session.send_stringcmd(&format!("specmode {}", next as i32));
+                            self.session
+                                .send_stringcmd(&format!("specmode {}", next as i32));
                         }
                     }
                     EngineAction::SpecMenu(visible) => {
@@ -1459,7 +1487,8 @@ impl Cs16App {
                         if name.trim().is_empty() {
                             self.cvars.warn("usage: record <demoname>");
                         } else if !self.session.is_active() || self.session.is_demo() {
-                            self.cvars.warn("must be connected to a server to record a demo");
+                            self.cvars
+                                .warn("must be connected to a server to record a demo");
                         } else {
                             let clean = name.trim().trim_end_matches(".dem").to_string();
                             self.session.start_recording("cstrike");
@@ -1734,15 +1763,19 @@ impl Cs16App {
                 .as_ref()
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no vfs"))
                 .and_then(|v| {
-                    v.read_bytes(&fname)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))
+                    v.read_bytes(&fname).map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string())
+                    })
                 })
         });
         match bytes {
             Ok(data) => match Session::start_demo(self.vfs.as_ref(), &data) {
                 Ok(mut sess) => {
                     if timedemo {
-                        if let Some(report) = sess.demo_player_mut().map(|p| p.run_timedemo_all(1.0 / 60.0)) {
+                        if let Some(report) = sess
+                            .demo_player_mut()
+                            .map(|p| p.run_timedemo_all(1.0 / 60.0))
+                        {
                             self.cvars.info(format!(
                                 "timedemo {}: {} frames, {:.3}s, {:.1} fps",
                                 fname, report.frames, report.elapsed_secs, report.avg_fps
@@ -1761,7 +1794,9 @@ impl Cs16App {
                     self.menu_ui.visible = false;
                     self.sync_cursor_capture();
                 }
-                Err(e) => self.cvars.warn(format!("Failed to start demo {fname}: {e}")),
+                Err(e) => self
+                    .cvars
+                    .warn(format!("Failed to start demo {fname}: {e}")),
             },
             Err(e) => self.cvars.warn(format!("Couldn't open {fname}: {e}")),
         }
@@ -1827,9 +1862,9 @@ impl Cs16App {
         match self.session.server_console(line) {
             Some(out) if !out.is_empty() => self.cvars.info(out.trim_end().to_string()),
             Some(_) => {}
-            None => self
-                .cvars
-                .warn(format!("\"{line}\" needs a local game (the server is elsewhere)")),
+            None => self.cvars.warn(format!(
+                "\"{line}\" needs a local game (the server is elsewhere)"
+            )),
         }
     }
 
@@ -2187,8 +2222,8 @@ impl Cs16App {
         );
         let pitch_up = self.cvars.get_f32("cl_pitchup");
         let pitch_down = self.cvars.get_f32("cl_pitchdown");
-        let strafe_mode = self.input_state.active_actions.contains("strafe")
-            || self.cvars.get_bool("lookstrafe");
+        let strafe_mode =
+            self.input_state.active_actions.contains("strafe") || self.cvars.get_bool("lookstrafe");
         let yaw_delta_x = if strafe_mode {
             let m_side = finite_or(self.cvars.get_f32("m_side"), 0.8);
             self.strafe_sidemove += adj_x * sens * m_side;
@@ -2210,7 +2245,12 @@ impl Cs16App {
     fn render_and_step(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
         let now = Instant::now();
         let raw_dt = (now - self.last_frame).as_secs_f32();
-        let dt = raw_dt.clamp(0.0001, 0.1);
+        let dt = if self.last_connect_addr.is_none() {
+            self.headless_fixed_dt
+                .unwrap_or_else(|| raw_dt.clamp(0.0001, 0.1))
+        } else {
+            raw_dt.clamp(0.0001, 0.1)
+        };
         self.last_frame = now;
 
         let inst_fps = 1.0 / raw_dt.max(0.0001);
@@ -2247,10 +2287,12 @@ impl Cs16App {
         self.apply_view_angle_updates();
 
         for um in self.session.drain_unknown_usermsgs() {
-            if !self
-                .mod_transfer
-                .ingest_usermsg(&um.name, &um.payload, &mut self.mod_host, self.vfs.as_mut())
-            {
+            if !self.mod_transfer.ingest_usermsg(
+                &um.name,
+                &um.payload,
+                &mut self.mod_host,
+                self.vfs.as_mut(),
+            ) {
                 self.mod_host.on_usermsg(&um.name, &um.payload);
             }
         }
@@ -2317,7 +2359,8 @@ impl Cs16App {
             && self.session.loaded_map() != Some(map.as_str())
             && let Err(err) = self.load_map(&map)
         {
-            self.cvars.error(format!("Failed to load map \"{map}\": {err}"));
+            self.cvars
+                .error(format!("Failed to load map \"{map}\": {err}"));
             self.end_session();
         }
 
@@ -2398,7 +2441,9 @@ impl Cs16App {
             bgm_enabled,
             mp3_fade,
         );
-        let want_menu_music = !self.session.is_active() && self.launch.auto_screenshot.is_none();
+        let want_menu_music = !self.session.is_active()
+            && self.launch.auto_screenshot.is_none()
+            && self.launch.record_dir.is_none();
         self.audio.sync_menu_music(
             self.vfs.as_ref(),
             want_menu_music,
@@ -2408,8 +2453,7 @@ impl Cs16App {
             dt,
         );
 
-        let default_fov = finite_or(self.cvars.get_f32("default_fov"), 90.0)
-            .clamp(60.0, 120.0);
+        let default_fov = finite_or(self.cvars.get_f32("default_fov"), 90.0).clamp(60.0, 120.0);
 
         // 2. The frame of the session (reusing `self.frame_view` via `build_view_into`).
         let mut has_view = false;
@@ -2430,7 +2474,10 @@ impl Cs16App {
             self.in_game_frames += 1;
             if let Some(ui_mode) = self.launch.startup_ui.clone() {
                 let m = ui_mode.to_ascii_lowercase();
-                if matches!(m.as_str(), "hud" | "buy" | "scoreboard" | "commandmenu" | "chat") {
+                if matches!(
+                    m.as_str(),
+                    "hud" | "buy" | "scoreboard" | "commandmenu" | "chat"
+                ) {
                     if self.in_game_frames == 2 {
                         self.session.send_stringcmd("jointeam 2");
                     } else if self.in_game_frames == 6 {
@@ -2470,7 +2517,8 @@ impl Cs16App {
                             h.vgui_menu = None;
                             h.menu = None;
                         });
-                        self.buy_team_class_ui.open_kind(VguiMenuKind::ClassCt, true);
+                        self.buy_team_class_ui
+                            .open_kind(VguiMenuKind::ClassCt, true);
                         self.startup_ui_applied = true;
                         self.sync_cursor_capture();
                     }
@@ -2547,9 +2595,9 @@ impl Cs16App {
                 finite_or(self.camera.yaw_deg, 0.0),
                 0.0,
             );
-            if let Some(registry) = self
-                .session
-                .build_view_into(&mut self.frame_view, angles, &inputs)
+            if let Some(registry) =
+                self.session
+                    .build_view_into(&mut self.frame_view, angles, &inputs)
             {
                 if let (Some(reg), Some(rt)) = (registry, &mut self.runtime) {
                     rt.renderer.set_model_registry(reg);
@@ -2564,7 +2612,8 @@ impl Cs16App {
                 self.camera.position
             };
             let yaw_deg = self.camera.yaw_deg;
-            self.session.with_hud(|h| self.hud_anim.step_with_pose(dt, h, hud_now, eye, yaw_deg));
+            self.session
+                .with_hud(|h| self.hud_anim.step_with_pose(dt, h, hud_now, eye, yaw_deg));
         }
         self.weapon_switch_timer = (self.weapon_switch_timer - dt).max(0.0);
         self.weapon_buckets.step(dt);
@@ -2582,7 +2631,8 @@ impl Cs16App {
                 self.audio.play_2d(self.vfs.as_ref(), path, 0.8 * master);
             }
         }
-        let voice_enable = self.cvars.get_bool("voice_enable") && self.cvars.get_bool("voice_modenable");
+        let voice_enable =
+            self.cvars.get_bool("voice_enable") && self.cvars.get_bool("voice_modenable");
         let voice_scale = finite_or(self.cvars.get_f32("voice_scale"), 1.0).clamp(0.0, 4.0);
         let voice_loopback = self.cvars.get_bool("voice_loopback");
         let voice_avg = finite_or(self.cvars.get_f32("voice_avggain"), 0.5);
@@ -2645,7 +2695,8 @@ impl Cs16App {
         let sess_now = self.session.now();
         let deaths: Vec<DeathNotice> = self.feeds.deaths.iter().map(|(d, _)| d.clone()).collect();
         let death_times: Vec<f64> = self.feeds.deaths.iter().map(|(_, t)| *t).collect();
-        let chat_entries: Vec<HudChatEntry> = self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
+        let chat_entries: Vec<HudChatEntry> =
+            self.feeds.chat.iter().map(|(c, _)| c.clone()).collect();
         let chat_times: Vec<f64> = self.feeds.chat.iter().map(|(_, t)| *t).collect();
         let chat: Vec<String> = chat_entries.iter().map(|c| c.text.clone()).collect();
         let pickups = self.feeds.pickups.clone();
@@ -2657,13 +2708,24 @@ impl Cs16App {
                 h.menu
                     .as_ref()
                     .filter(|m| !m.multipart && m.keys != 0 && !m.text.is_empty())
-                    .map(|m| menu_styled_lines_with_titles(&m.text, self.loc.as_ref(), Some(&self.titles)))
+                    .map(|m| {
+                        menu_styled_lines_with_titles(
+                            &m.text,
+                            self.loc.as_ref(),
+                            Some(&self.titles),
+                        )
+                    })
             })
             .flatten();
         let use_vgui_menus = self.cvars.get_bool("_vgui_menus");
         let active_vgui_menu = self
             .session
-            .with_hud(|h| h.vgui_menu.as_ref().filter(|v| !v.multipart && v.keys != 0).cloned())
+            .with_hud(|h| {
+                h.vgui_menu
+                    .as_ref()
+                    .filter(|v| !v.multipart && v.keys != 0)
+                    .cloned()
+            })
             .flatten();
         let fallback_vgui_lines = if !use_vgui_menus && styled_menu_now.is_none() {
             active_vgui_menu.as_ref().map(vgui_menu_fallback_lines)
@@ -2675,7 +2737,10 @@ impl Cs16App {
                 let local_ct = self
                     .session
                     .local_slot()
-                    .and_then(|s| self.session.with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT")))
+                    .and_then(|s| {
+                        self.session
+                            .with_hud(|h| h.players.get(&(s + 1)).is_some_and(|p| p.team == "CT"))
+                    })
                     .unwrap_or(false);
                 if kind == VguiMenuKind::Buy && self.buy_team_class_ui.active_res.is_none() {
                     self.feeds.center = None;
@@ -2704,18 +2769,20 @@ impl Cs16App {
             .session
             .local_slot()
             .and_then(|s| {
-                self.session.with_hud(|h| {
-                    h.players.get(&(s + 1)).map(|p| {
-                        (
-                            p.team == "CT",
-                            !p.team.is_empty() && !p.team.eq_ignore_ascii_case("UNASSIGNED"),
-                        )
+                self.session
+                    .with_hud(|h| {
+                        h.players.get(&(s + 1)).map(|p| {
+                            (
+                                p.team == "CT",
+                                !p.team.is_empty() && !p.team.eq_ignore_ascii_case("UNASSIGNED"),
+                            )
+                        })
                     })
-                })
-                .flatten()
+                    .flatten()
             })
             .unwrap_or((true, false));
-        let spec_players: Vec<(u8, String)> = names.iter().map(|(&k, v)| (k + 1, v.clone())).collect();
+        let spec_players: Vec<(u8, String)> =
+            names.iter().map(|(&k, v)| (k + 1, v.clone())).collect();
         let (round_secs_left, spec_hp) = self
             .session
             .with_hud(|h| {
@@ -2790,13 +2857,22 @@ impl Cs16App {
 
         let (hud_health, hud_hidden, hud_timer_vis, hud_nvg) = self
             .session
-            .with_hud(|h| (i32::from(h.health), h.hidden, h.timer_visible, h.night_vision))
+            .with_hud(|h| {
+                (
+                    i32::from(h.health),
+                    h.hidden,
+                    h.timer_visible,
+                    h.night_vision,
+                )
+            })
             .unwrap_or((0, 0, false, false));
         let hud_vis = compute_hud_visibility(alive, hud_health, hud_hidden, hud_timer_vis);
         if has_view {
             let v = &self.frame_view;
-            let (wid, wflags, on_ground, ducking, ch_spd, clip) = self.session.local_crosshair_state();
-            if !paused && hud_vis.crosshair && !scoped && should_draw_dynamic_crosshair(v.fov, wid) {
+            let (wid, wflags, on_ground, ducking, ch_spd, clip) =
+                self.session.local_crosshair_state();
+            if !paused && hud_vis.crosshair && !scoped && should_draw_dynamic_crosshair(v.fov, wid)
+            {
                 if wid != self.crosshair_last_weapon {
                     self.crosshair_shots_fired = 0;
                     self.crosshair_last_weapon = wid;
@@ -2821,7 +2897,12 @@ impl Cs16App {
                     dynamic: self.cvars.get_bool("cl_dynamiccrosshair"),
                     hide_hud: hud_hidden,
                 };
-                draw_crosshair_vgui(&rt.egui_ctx, &self.cvars, &mut self.crosshair_state, &ch_inputs);
+                draw_crosshair_vgui(
+                    &rt.egui_ctx,
+                    &self.cvars,
+                    &mut self.crosshair_state,
+                    &ch_inputs,
+                );
             }
             let mut extras = HudExtrasContext {
                 titles: Some(&self.titles),
@@ -2891,12 +2972,7 @@ impl Cs16App {
                 }
             });
             let _ = hud_state;
-            draw_voice_speakers(
-                &rt.egui_ctx,
-                &names,
-                &voice_speakers,
-                voice_local_talking,
-            );
+            draw_voice_speakers(&rt.egui_ctx, &names, &voice_speakers, voice_local_talking);
             draw_mod_hud(&rt.egui_ctx, &mod_hud_cmds);
             if let Some(styled) = &styled_menu_now {
                 let scale = (rt.egui_ctx.content_rect().height() / 768.0).clamp(0.85, 1.45);
@@ -2921,29 +2997,19 @@ impl Cs16App {
                 || self.buy_team_class_ui.active_res.is_some()
                 || styled_menu_now.is_some()
                 || fallback_vgui_lines.is_some();
-            let forced_spectator = self
-                .launch
-                .startup_ui
-                .as_deref()
-                .is_some_and(|s| {
-                    s.eq_ignore_ascii_case("spectator") || s.eq_ignore_ascii_case("spectator:menu")
-                })
-                && self.startup_ui_applied;
+            let forced_spectator = self.launch.startup_ui.as_deref().is_some_and(|s| {
+                s.eq_ignore_ascii_case("spectator") || s.eq_ignore_ascii_case("spectator:menu")
+            }) && self.startup_ui_applied;
             let show_spec_gui = (!alive && observer_mode != 0) || forced_spectator;
-            let show_spec_bars = self.cvars.get_bool("spec_hud_bars")
-                && (self.session.is_demo() || show_spec_gui);
+            let show_spec_bars =
+                self.cvars.get_bool("spec_hud_bars") && (self.session.is_demo() || show_spec_gui);
             if in_game && !modal_menu_open && (show_spec_gui || show_spec_bars) {
                 let player_weapons = &v.player_weapons;
                 let observed_target = v.observed_target;
                 let sidebar_players: Vec<SpecSidebarPlayer> = if show_spec_bars {
                     self.session
                         .with_hud(|h| {
-                            collect_spec_sidebar_players(
-                                h,
-                                &names,
-                                player_weapons,
-                                observed_target,
-                            )
+                            collect_spec_sidebar_players(h, &names, player_weapons, observed_target)
                         })
                         .unwrap_or_default()
                 } else {
@@ -3109,7 +3175,10 @@ impl Cs16App {
                     hostname: &hostname,
                     raw_motd,
                 };
-                if self.motd_ui.show(&rt.egui_ctx, &mut self.vgui_rt, &motd_ctx) {
+                if self
+                    .motd_ui
+                    .show(&rt.egui_ctx, &mut self.vgui_rt, &motd_ctx)
+                {
                     motd_close = true;
                 }
             }
@@ -3139,9 +3208,9 @@ impl Cs16App {
                     allowed_keys: active_vgui_menu.as_ref().map_or(0, |v| v.keys),
                     can_cancel,
                 };
-                vgui_cmd_out = self
-                    .buy_team_class_ui
-                    .show(&rt.egui_ctx, &mut self.vgui_rt, &buy_ctx);
+                vgui_cmd_out =
+                    self.buy_team_class_ui
+                        .show(&rt.egui_ctx, &mut self.vgui_rt, &buy_ctx);
             }
             cmdmenu_exec = self.command_menu_ui.show(
                 &rt.egui_ctx,
@@ -3214,7 +3283,9 @@ impl Cs16App {
             self.session.local_slot(),
             &dlg_ctx,
         );
-        let demo_actions = self.demo_player_ui.show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
+        let demo_actions = self
+            .demo_player_ui
+            .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let pw_submit = self
             .password_ui
             .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
@@ -3376,7 +3447,8 @@ impl Cs16App {
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
         for ui_snd in self.vgui_rt.take_ui_sounds() {
-            self.audio.play_ui_sound(self.vfs.as_ref(), ui_snd.vfs_path());
+            self.audio
+                .play_ui_sound(self.vfs.as_ref(), ui_snd.vfs_path());
         }
 
         // 4. The 3D frame: flush any late mouse motion before camera matrix build and sync
@@ -3402,108 +3474,129 @@ impl Cs16App {
         let default_lightstyles = [1.0f32; 64];
         let mut fog = None;
         let mut sensitivity_scale = 1.0;
-        let (beams_slice, points_slice, decals_slice, custom_decals_opt, lightstyles_ref, lights, elights_slice) =
-            if has_view {
-                let v = &self.frame_view;
-                let punch_x = finite_or(v.punch.x, 0.0);
-                let punch_y = finite_or(v.punch.y, 0.0);
-                let punch_z = finite_or(v.punch.z, 0.0);
-                let v_idlescale = finite_or(self.cvars.get_f32("v_idlescale"), 0.0);
-                let idle = calc_view_idle(time_sec, v_idlescale);
-                render_cam.position.z += finite_or(v.bob, 0.0) + finite_or(v.shake_z, 0.0);
-                render_cam.pitch_deg =
-                    (finite_or(render_cam.pitch_deg, 0.0) + punch_x + finite_or(v.shake_angles.x, 0.0) + idle.pitch)
-                        .clamp(-89.0, 89.0);
-                render_cam.yaw_deg =
-                    (finite_or(render_cam.yaw_deg, 0.0) + punch_y + finite_or(v.shake_angles.y, 0.0) + idle.yaw)
-                        .rem_euclid(360.0);
-                render_cam.roll_deg =
-                    (punch_z + finite_or(v.roll_deg, 0.0) + finite_or(v.shake_angles.z, 0.0) + idle.roll)
-                        .clamp(-90.0, 90.0);
-                let base_fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
-                fov = (base_fov + finite_or(v.underwater_fov_delta, 0.0)).clamp(10.0, 120.0);
-                let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
-                sensitivity_scale = compute_zoom_sens_scale(base_fov, default_fov, zoom_ratio);
-                if let Some(vm) = &v.viewmodel {
-                    let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
-                    let b = finite_or(v.bob, 0.0);
-                    let fov_z = if (fov - 90.0).abs() < 0.5 || (fov - 110.0).abs() < 0.5 {
-                        1.0
-                    } else if (fov - 100.0).abs() < 0.5 {
-                        2.0
-                    } else if (fov - 80.0).abs() < 0.5 {
-                        0.5
-                    } else {
-                        0.0
-                    };
-                    // `client.dll` `0x1006b52f..1006b7a0`: project `bob * 0.4` along full 3D view forward.
-                    let (view_fwd, _, _) = cs_client::render::scene::angle_vectors(Vec3::new(
-                        render_cam.pitch_deg,
-                        render_cam.yaw_deg,
-                        render_cam.roll_deg,
-                    ));
-                    let vm_eye = eye
-                        + Vec3::new(0.0, 0.0, b - 1.0 + fov_z)
-                        + view_fwd * (b * 0.4)
-                        + v.viewmodel_lag;
-                    let (vm_yaw, vm_pitch, vm_roll) = calc_viewmodel_angles(
-                        render_cam.yaw_deg,
-                        render_cam.pitch_deg,
-                        render_cam.roll_deg,
-                        b,
-                        idle,
-                    );
-                    let xf = viewmodel_transform_with_angles(
-                        vm_eye,
-                        vm_yaw,
-                        vm_pitch,
-                        vm_roll,
-                        Vec3::ZERO,
-                        vm.right_hand,
-                    );
-                    viewmodel_inst = Some((
-                        vm.path.as_str(),
-                        xf,
-                        vm.sequence,
-                        vm.body,
-                        vm.animtime,
-                        vm.right_hand,
-                    ));
-                }
-                fog = if self.cvars.get_bool("gl_fog") { v.fog } else { None };
-                (
-                    v.beams.as_slice(),
-                    v.points.as_slice(),
-                    v.decals.as_slice(),
-                    Some(&v.custom_decals),
-                    &v.lightstyles,
-                    v.lights,
-                    v.elights.as_slice(),
-                )
+        let (
+            beams_slice,
+            points_slice,
+            decals_slice,
+            custom_decals_opt,
+            lightstyles_ref,
+            lights,
+            elights_slice,
+        ) = if has_view {
+            let v = &self.frame_view;
+            let punch_x = finite_or(v.punch.x, 0.0);
+            let punch_y = finite_or(v.punch.y, 0.0);
+            let punch_z = finite_or(v.punch.z, 0.0);
+            let v_idlescale = finite_or(self.cvars.get_f32("v_idlescale"), 0.0);
+            let idle = calc_view_idle(time_sec, v_idlescale);
+            render_cam.position.z += finite_or(v.bob, 0.0) + finite_or(v.shake_z, 0.0);
+            render_cam.pitch_deg = (finite_or(render_cam.pitch_deg, 0.0)
+                + punch_x
+                + finite_or(v.shake_angles.x, 0.0)
+                + idle.pitch)
+                .clamp(-89.0, 89.0);
+            render_cam.yaw_deg = (finite_or(render_cam.yaw_deg, 0.0)
+                + punch_y
+                + finite_or(v.shake_angles.y, 0.0)
+                + idle.yaw)
+                .rem_euclid(360.0);
+            render_cam.roll_deg = (punch_z
+                + finite_or(v.roll_deg, 0.0)
+                + finite_or(v.shake_angles.z, 0.0)
+                + idle.roll)
+                .clamp(-90.0, 90.0);
+            let base_fov = finite_or(v.fov, default_fov).clamp(10.0, 120.0);
+            fov = (base_fov + finite_or(v.underwater_fov_delta, 0.0)).clamp(10.0, 120.0);
+            let zoom_ratio = finite_or(self.cvars.get_f32("zoom_sensitivity_ratio"), 1.2).max(0.0);
+            sensitivity_scale = compute_zoom_sens_scale(base_fov, default_fov, zoom_ratio);
+            if let Some(vm) = &v.viewmodel {
+                let eye = if v.eye.is_finite() { v.eye } else { Vec3::ZERO };
+                let b = finite_or(v.bob, 0.0);
+                let fov_z = if (fov - 90.0).abs() < 0.5 || (fov - 110.0).abs() < 0.5 {
+                    1.0
+                } else if (fov - 100.0).abs() < 0.5 {
+                    2.0
+                } else if (fov - 80.0).abs() < 0.5 {
+                    0.5
+                } else {
+                    0.0
+                };
+                // `client.dll` `0x1006b52f..1006b7a0`: project `bob * 0.4` along full 3D view forward.
+                let (view_fwd, _, _) = cs_client::render::scene::angle_vectors(Vec3::new(
+                    render_cam.pitch_deg,
+                    render_cam.yaw_deg,
+                    render_cam.roll_deg,
+                ));
+                let vm_eye = eye
+                    + Vec3::new(0.0, 0.0, b - 1.0 + fov_z)
+                    + view_fwd * (b * 0.4)
+                    + v.viewmodel_lag;
+                let (vm_yaw, vm_pitch, vm_roll) = calc_viewmodel_angles(
+                    render_cam.yaw_deg,
+                    render_cam.pitch_deg,
+                    render_cam.roll_deg,
+                    b,
+                    idle,
+                );
+                let xf = viewmodel_transform_with_angles(
+                    vm_eye,
+                    vm_yaw,
+                    vm_pitch,
+                    vm_roll,
+                    Vec3::ZERO,
+                    vm.right_hand,
+                );
+                viewmodel_inst = Some((
+                    vm.path.as_str(),
+                    xf,
+                    vm.sequence,
+                    vm.body,
+                    vm.animtime,
+                    vm.right_hand,
+                ));
+            }
+            fog = if self.cvars.get_bool("gl_fog") {
+                v.fog
             } else {
-                (
-                    &[][..],
-                    &[][..],
-                    &[][..],
-                    None,
-                    &default_lightstyles,
-                    GpuLightsUniform::default(),
-                    &[][..],
-                )
+                None
             };
+            (
+                v.beams.as_slice(),
+                v.points.as_slice(),
+                v.decals.as_slice(),
+                Some(&v.custom_decals),
+                &v.lightstyles,
+                v.lights,
+                v.elights.as_slice(),
+            )
+        } else {
+            (
+                &[][..],
+                &[][..],
+                &[][..],
+                None,
+                &default_lightstyles,
+                GpuLightsUniform::default(),
+                &[][..],
+            )
+        };
         self.mouse_sens_scale = sensitivity_scale;
 
-        let debug_mode = if self.cvars.get_bool("r_lightmap") || self.cvars.get_bool("r_lightmap_only")
-        {
-            1.0
-        } else if self.cvars.get_bool("r_fullbright") {
-            2.0
-        } else {
-            0.0
-        };
+        let debug_mode =
+            if self.cvars.get_bool("r_lightmap") || self.cvars.get_bool("r_lightmap_only") {
+                1.0
+            } else if self.cvars.get_bool("r_fullbright") {
+                2.0
+            } else {
+                0.0
+            };
         let texture_mode = TextureFilterMode::parse(self.cvars.get_str("gl_texturemode"));
         let anisotropy = self.cvars.get_i32("gl_ansio").clamp(1, 16) as u16;
-        let msaa_samples = if self.cvars.get_i32("gl_msaa") >= 4 { 4 } else { 1 };
+        let msaa_samples = if self.cvars.get_i32("gl_msaa") >= 4 {
+            4
+        } else {
+            1
+        };
         let viewmodel_fov = finite_or(self.cvars.get_f32("viewmodel_fov"), 90.0).clamp(50.0, 120.0);
         let settings = RenderSettings {
             gamma: finite_or(self.cvars.get_f32("gamma"), 2.5).clamp(1.8, 3.0),
@@ -3529,22 +3622,23 @@ impl Cs16App {
             time_sec,
             fog,
         };
-        let vm_ref = viewmodel_inst.map(|(path, xf, seq, body, started, right_hand)| {
-            StudioInstance {
-                model_path: path,
-                transform: xf,
-                sequence: seq,
-                frame: 0.0,
-                animtime: started,
-                framerate: 1.0,
-                now: sess_now as f32,
-                body,
-                light_rgb: Vec3::splat(0.95),
-                flip_winding: right_hand,
-                attached_model: None,
-                ..StudioInstance::default()
-            }
-        });
+        let vm_ref =
+            viewmodel_inst.map(
+                |(path, xf, seq, body, started, right_hand)| StudioInstance {
+                    model_path: path,
+                    transform: xf,
+                    sequence: seq,
+                    frame: 0.0,
+                    animtime: started,
+                    framerate: 1.0,
+                    now: sess_now as f32,
+                    body,
+                    light_rgb: Vec3::splat(0.95),
+                    flip_winding: right_hand,
+                    attached_model: None,
+                    ..StudioInstance::default()
+                },
+            );
         let scene_data = SceneDynamicData {
             vfs: self.vfs.as_ref(),
             viewmodel: vm_ref,
@@ -3566,16 +3660,34 @@ impl Cs16App {
         let waiting_for_game = self.launch.startup_map.is_some()
             || !self.launch.startup_exec.is_empty()
             || self.session.is_active();
+        let ready_for_capture = if waiting_for_game {
+            (self.in_game_frames >= min_in_game_frames
+                && (self.startup_ui_applied || self.launch.startup_ui.is_none()))
+                || self.frame_count >= 600
+        } else {
+            self.frame_count >= 6
+        };
         let auto_capture_now = self.launch.auto_screenshot.is_some()
             && if waiting_for_game {
-                (self.in_game_frames >= min_in_game_frames
-                    && (self.startup_ui_applied || self.launch.startup_ui.is_none()))
-                    || self.frame_count >= 600
+                ready_for_capture
             } else {
                 self.frame_count == 6
             };
+        let record_target = if self.launch.record_frames == 0 {
+            72
+        } else {
+            self.launch.record_frames
+        };
+        let record_this_frame = self.launch.record_dir.is_some()
+            && ready_for_capture
+            && self.recorded_frames < record_target;
         let capture_path = if auto_capture_now {
             self.launch.auto_screenshot.take()
+        } else if record_this_frame {
+            self.launch
+                .record_dir
+                .as_ref()
+                .map(|dir| dir.join(format!("frame_{:04}.png", self.recorded_frames)))
         } else {
             self.pending_screenshot.take()
         };
@@ -3594,6 +3706,15 @@ impl Cs16App {
         }
         if let Some(stats) = render_result {
             self.last_stats = stats;
+            if record_this_frame {
+                self.recorded_frames += 1;
+                if self.recorded_frames >= record_target {
+                    if let Some(el) = event_loop {
+                        el.exit();
+                    }
+                    return true;
+                }
+            }
             if auto_capture_now && self.exit_after_screenshot {
                 if let Some(el) = event_loop {
                     el.exit();
@@ -3679,9 +3800,7 @@ impl Cs16App {
             self.options_ui.save_requested = false;
             self.save_config();
         }
-        if !pending_actions.is_empty()
-            && self.process_actions(pending_actions, event_loop)
-        {
+        if !pending_actions.is_empty() && self.process_actions(pending_actions, event_loop) {
             return true;
         }
         self.sync_cursor_capture();
@@ -3695,7 +3814,8 @@ impl Cs16App {
                 self.session.is_active(),
                 self.session.max_clients(),
             ) {
-                let timescale = finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
+                let timescale =
+                    finite_or(self.cvars.get_f32("host_timescale"), 1.0).clamp(0.05, 10.0);
                 let target = Duration::from_secs_f64(f64::from(timescale) / (f64::from(fps) + 0.5));
                 let elapsed = now.elapsed();
                 if let Some(rem) = target.checked_sub(elapsed)
@@ -3791,8 +3911,15 @@ impl Cs16App {
         false
     }
 
-    /// Run headless offscreen without creating any visible OS window (for `cargo xtask visual-diff`).
+    /// Run headless offscreen without creating any visible OS window (for `cargo xtask visual-diff`
+    /// and headless frame-sequence recording).
     pub fn run_headless(mut self) -> Result<(), String> {
+        if let Some(dir) = &self.launch.record_dir {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("create record dir {}: {e}", dir.display()))?;
+            let fps = self.launch.record_fps.clamp(1.0, 120.0);
+            self.headless_fixed_dt = Some(1.0 / fps);
+        }
         let renderer = Renderer::new_headless(self.launch.width, self.launch.height)?;
         let (egui_ctx, bg_texture, brand_logo, hud_sprites, vgui_bank) = self.init_egui_context();
         info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) headless runtime ready");
@@ -3811,22 +3938,49 @@ impl Cs16App {
             self.end_session();
             return Ok(());
         }
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let timeout_secs = if self.launch.record_dir.is_some() {
+            90
+        } else {
+            30
+        };
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
             if self.render_and_step(None) {
                 self.end_session();
                 return Ok(());
             }
-            std::thread::sleep(Duration::from_millis(16));
+            if self.launch.record_dir.is_some() && self.is_in_game() {
+                if self.last_connect_addr.is_some() {
+                    let fps = self.launch.record_fps.clamp(1.0, 120.0);
+                    std::thread::sleep(Duration::from_secs_f32(1.0 / fps));
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(16));
+            }
         }
         let pending = self.launch.auto_screenshot.take();
+        let rec_dir = self.launch.record_dir.take();
+        let rec_done = self.recorded_frames;
+        let rec_target = if self.launch.record_frames == 0 {
+            72
+        } else {
+            self.launch.record_frames
+        };
         self.end_session();
         if let Some(path) = pending {
             return Err(format!(
-                "headless run timed out after 30s before saving {} (in_game_frames={}, frames={})",
+                "headless run timed out after {timeout_secs}s before saving {} (in_game_frames={}, frames={})",
                 path.display(),
                 self.in_game_frames,
                 self.frame_count
+            ));
+        }
+        if let Some(dir) = rec_dir
+            && rec_done < rec_target
+        {
+            return Err(format!(
+                "headless recording timed out after {timeout_secs}s in {} ({rec_done}/{rec_target} frames)",
+                dir.display()
             ));
         }
         Ok(())
@@ -3939,7 +4093,11 @@ impl ApplicationHandler for Cs16App {
                         }
                     };
                     let count = notches.unsigned_abs().min(16);
-                    let key_name = if notches >= 0 { "mwheelup" } else { "mwheeldown" };
+                    let key_name = if notches >= 0 {
+                        "mwheelup"
+                    } else {
+                        "mwheeldown"
+                    };
                     for _ in 0..count {
                         let _ = self.handle_bound_key(key_name, true, Some(event_loop));
                         let _ = self.handle_bound_key(key_name, false, Some(event_loop));
@@ -4111,7 +4269,12 @@ fn compute_mouse_move_params(
 
 /// GoldSrc frame rate cap (`hw.dll` `FUN_101d43d0`, `1 < maxclients`): enforces `fps_max >= 20.0`
 /// in multiplayer (`max_clients > 1`).
-fn effective_fps_limit(fps_max: f32, fps_override: bool, active: bool, max_clients: u8) -> Option<f32> {
+fn effective_fps_limit(
+    fps_max: f32,
+    fps_override: bool,
+    active: bool,
+    max_clients: u8,
+) -> Option<f32> {
     if fps_max <= 0.0 {
         return None;
     }
@@ -4143,7 +4306,12 @@ fn build_score_rows(hud: &HudState, names: &BTreeMap<u8, String>) -> (Vec<ScoreR
     let rows = hud
         .players
         .iter()
-        .filter(|(_, p)| matches!(p.team.as_str(), "CT" | "TERRORIST" | "SPECTATOR" | "UNASSIGNED"))
+        .filter(|(_, p)| {
+            matches!(
+                p.team.as_str(),
+                "CT" | "TERRORIST" | "SPECTATOR" | "UNASSIGNED"
+            )
+        })
         .filter_map(|(slot, p)| {
             let slot0 = slot.checked_sub(1)?;
             Some(ScoreRow {
@@ -4186,7 +4354,12 @@ fn classify_shell_command(cmd: &ConsoleCommand) -> Option<ShellStuffAction> {
         "slot10" => Some(ShellStuffAction::CloseMenu),
         "stopsound" => Some(ShellStuffAction::StopSound),
         "echo" => Some(ShellStuffAction::Echo(cmd.args.join(" "))),
-        "mp3" if matches!(cmd.args.first().map(String::as_str), Some("play" | "loop" | "stop")) => {
+        "mp3"
+            if matches!(
+                cmd.args.first().map(String::as_str),
+                Some("play" | "loop" | "stop")
+            ) =>
+        {
             Some(ShellStuffAction::Mp3(cmd.args.clone()))
         }
         "cd" if matches!(
@@ -4287,7 +4460,12 @@ mod tests {
     #[test]
     fn score_rows_include_spectators_and_unassigned() {
         let mut hud = HudState::default();
-        for (slot1, team) in [(1u8, "CT"), (2, "TERRORIST"), (3, "SPECTATOR"), (4, "UNASSIGNED")] {
+        for (slot1, team) in [
+            (1u8, "CT"),
+            (2, "TERRORIST"),
+            (3, "SPECTATOR"),
+            (4, "UNASSIGNED"),
+        ] {
             hud.players.insert(
                 slot1,
                 PlayerScore {
@@ -4333,7 +4511,10 @@ mod tests {
             name: "slot10".into(),
             args: Vec::new(),
         };
-        assert_eq!(classify_shell_command(&slot10), Some(ShellStuffAction::CloseMenu));
+        assert_eq!(
+            classify_shell_command(&slot10),
+            Some(ShellStuffAction::CloseMenu)
+        );
     }
 
     #[test]
@@ -4361,16 +4542,14 @@ mod tests {
         assert!((high_zoom - 2.5).abs() < 1e-5);
 
         // Total (sensitivity + accel) is capped by m_customaccel_max (> 1e-4) BEFORE zoom scaling.
-        let (dx, dy, sens) = compute_mouse_move_params(
-            10.0, 0.0, 2.0, 0.5, 1, 1.0, 5.0, 5.0, 0.022, 0.022,
-        );
+        let (dx, dy, sens) =
+            compute_mouse_move_params(10.0, 0.0, 2.0, 0.5, 1, 1.0, 5.0, 5.0, 0.022, 0.022);
         assert_eq!((dx, dy), (10.0, 0.0));
         assert!((sens - 2.5).abs() < 1e-5);
 
         // m_customaccel == 2 applies extra m_yaw / m_pitch scaling.
-        let (dx2, dy2, sens2) = compute_mouse_move_params(
-            100.0, -50.0, 2.0, 1.0, 2, 0.5, 0.0, 1.0, 0.022, 0.03,
-        );
+        let (dx2, dy2, sens2) =
+            compute_mouse_move_params(100.0, -50.0, 2.0, 1.0, 2, 0.5, 0.0, 1.0, 0.022, 0.03);
         assert!((dx2 - 2.2).abs() < 1e-5);
         assert!((dy2 - (-1.5)).abs() < 1e-5);
         let expected_mag = (dx2 * dx2 + dy2 * dy2).sqrt();
@@ -4387,11 +4566,19 @@ mod tests {
     fn hud_feeds_expire_respects_zero_deathnotice_and_saytext() {
         let mut feeds = HudFeeds::default();
         feeds.deaths.push((
-            DeathNotice { killer: 1, victim: 2, headshot: false, weapon: "ak47".into() },
+            DeathNotice {
+                killer: 1,
+                victim: 2,
+                headshot: false,
+                weapon: "ak47".into(),
+            },
             1.0,
         ));
         feeds.chat.push((
-            HudChatEntry { text: "hi".into(), team: None },
+            HudChatEntry {
+                text: "hi".into(),
+                team: None,
+            },
             1.0,
         ));
         feeds.expire(1.1, 0.0, 0.0, 2.0);
@@ -4405,7 +4592,10 @@ mod tests {
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Right), Some("mouse2"));
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Middle), Some("mouse3"));
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Back), Some("mouse4"));
-        assert_eq!(mouse_button_to_goldsrc(MouseButton::Forward), Some("mouse5"));
+        assert_eq!(
+            mouse_button_to_goldsrc(MouseButton::Forward),
+            Some("mouse5")
+        );
         assert_eq!(mouse_button_to_goldsrc(MouseButton::Other(9)), None);
     }
 
