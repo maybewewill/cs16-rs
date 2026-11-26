@@ -23,7 +23,7 @@ Milestone release reaching **`100.0%` Parity Ledger completion** (`1,783 / 1,783
   - Added `cs16_wasm_host_bridge!` and `cs16_wasm_exports!` macros in `cs-mod-sdk` and migrated all shipped Rust showcase mods (`std_admin`, `std_statsx`, `csdm`, `gungame`, `zombie_plague`) plus `README.md` / `docs/MODDING.md` snippets and compile-tested them under `#![forbid(unsafe_code)]`.
   - Pruned stale worktrees and removed 29 merged leftover `worktree-agent-*` local branches.
 - **Headless Gameplay Recording & Showcase Upgrade:**
-  - Added `--record-dir <dir> --record-frames <N> --record-fps <fps>` deterministic fixed-step headless capture to `cs-client`, recorded the animated `de_dust2` gameplay preview (`.github/assets/gameplay-preview.gif`, `3.44 MiB`) and clean-room `dm_rusthouse` Instant Demo showcase (`.github/assets/shot-instant-demo.jpg`), and upgraded `xtask visual-diff` to automatically target `target/release/` when compiled in release mode.
+  - Added `--record-dir <dir> --record-frames <N> --record-fps <fps>` deterministic fixed-step headless capture to `cs-client`, recorded the animated `de_dust2` gameplay preview (`.github/assets/gameplay-preview.webp`, `800x450` @ `22 FPS`, `3.37 MiB`) and clean-room `dm_rusthouse` Instant Demo showcase (`.github/assets/shot-instant-demo.jpg`), and upgraded `xtask visual-diff` to automatically target `target/release/` when compiled in release mode.
 
 ### Benchmarks (`--release` LTO vs `dev` vs Retail Steam `hlds.exe` Build 10210)
 

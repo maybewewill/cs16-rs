@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "cs-amxx"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-cvar",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "cs-assets"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "cs-vfs",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "cs-bot"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-pm",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "cs-client"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "cs-clientcore"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bzip2-rs",
  "cs-assets",
@@ -706,11 +706,11 @@ dependencies = [
 
 [[package]]
 name = "cs-cvar"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "cs-engine"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-cvar",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "cs-game"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-amxx",
  "cs-assets",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "cs-hltv"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-clientcore",
  "cs-cvar",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "cs-local"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-clientcore",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "cs-master"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "cs-mod-api"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "cs-mod-host"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-amxx",
  "cs-assets",
@@ -821,11 +821,11 @@ dependencies = [
 
 [[package]]
 name = "cs-mod-macros"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "cs-mod-py"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-mod-api",
  "cs-mod-host",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "cs-mod-sdk"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-mod-api",
  "cs-mod-macros",
@@ -846,14 +846,14 @@ dependencies = [
 
 [[package]]
 name = "cs-platform"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "web-sys",
 ]
 
 [[package]]
 name = "cs-pm"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-vfs",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "cs-probe"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-clientcore",
  "cs-platform",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "cs-proto48"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "bzip2-rs",
  "glam",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "cs-relay"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-clientcore",
  "cs-cvar",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "cs-server"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "crc32fast",
  "cs-amxx",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "cs-sim"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-cvar",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "cs-transport"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "thiserror 2.0.21",
  "tokio",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "cs-vfs"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-platform",
  "thiserror 2.0.21",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "cs-web"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-client",
@@ -5041,7 +5041,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cs-assets",
  "cs-client",

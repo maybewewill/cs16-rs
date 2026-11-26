@@ -26,9 +26,9 @@
 ## Screenshots & Footage
 
 <div align="center">
-  <img src=".github/assets/gameplay-preview.gif" alt="cs16-rs real-time Vulkan gameplay preview on de_dust2 with AK-47, ZBots, classic GoldSrc HUD, and net_graph 1" width="100%">
+  <img src=".github/assets/gameplay-preview.webp" alt="cs16-rs real-time Vulkan gameplay preview on de_dust2 with AK-47, ZBots, classic GoldSrc HUD, and net_graph 1" width="100%">
   <br>
-  <sub><i>Live <code>--release</code> LTO <code>wgpu</code> Vulkan capture on <code>de_dust2</code> — active ZBots, AK-47 viewmodel &amp; recoil, authentic GoldSrc HUD sprites, radar, and <code>net_graph 1</code>.</i></sub>
+  <sub><i>Live 800×450 22 FPS <code>--release</code> LTO <code>wgpu</code> Vulkan capture on <code>de_dust2</code> — active ZBots, AK-47 viewmodel &amp; recoil, authentic GoldSrc HUD sprites, radar, and <code>net_graph 1</code>.</i></sub>
 </div>
 
 <br>
@@ -326,7 +326,7 @@ flowchart TD
 Tracked honestly across 15 TOML ledgers via `cargo run -p xtask -- parity`:
 
 - **Implemented:** **`100.0%`** (`1,783 / 1,783` tracked items across bots, cvars, delta, engine, entities, mods, movement, render, sound, tempents, ui, usermsg, weapons, web, wire — **`0` missing items**).
-- **Automated Test Coverage:** **`96.6%`** (`2,200+` passing workspace tests, zero warnings across `clippy --workspace --all-targets -- -D warnings`, full `wasm32-unknown-unknown` clean check).
+- **Automated Test Coverage:** **`96.6%`** (`2,167` passing workspace tests, zero warnings across `clippy --workspace --all-targets -- -D warnings`, full `wasm32-unknown-unknown` `-D warnings` clean check).
 - **Live Steam Build 10210 `hlds.exe` Differential Verification:** Verified `cs_office` (`218/218` edicts), `de_dust2` (`51/51` edicts, C4 plant/drop), `as_oilrig` (VIP), 25-map baseline audit (`24/25` exact), 65 s `cs-pm` movement trace (`0.00446 u` mean error), live head-to-head `hlds.exe` Build 10210 startup/RAM/tick/interop audit, and headless `--release` LTO `de_dust2` RGB visual parity (`(-0.4, -0.8, +0.0)` vs retail `(113, 96, 65) +/- 4`). Manual owner live-play sign-off checklists live in [`docs/parity/checklists/`](docs/parity/checklists/).
 
 ```bash
