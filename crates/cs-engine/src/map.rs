@@ -18,6 +18,9 @@ pub struct ServerMap {
     pub entities: Vec<Entity>,
     vis: Option<Arc<BspMap>>,
     collision: Option<Arc<WorldCollision>>,
+    /// Pre-decompressed PVS bit rows (`Vec<u64>`) built lazily once per map so per-client
+    /// visibility queries perform zero allocations and zero RLE decompression.
+    pvs: OnceLock<Option<PvsTable>>,
     /// The potentially audible set of every leaf, built by [`calc_pas`](Self::calc_pas) when
     /// the map is activated, outside any client frame. Unset until then, and `None` inside for
     /// a single-client server, a map without visibility data or one over the caps
@@ -25,6 +28,8 @@ pub struct ServerMap {
     pas: OnceLock<Option<Pas>>,
 }
 
+/// Maximum visible leaves pre-decompressed into the flat `u64` PVS table (`MAX_MAP_LEAFS`).
+const MAX_PVS_LEAFS: usize = 8192;
 /// Most visible leaves a PAS is built for. Shipped maps have 1.5 to 3.7 thousand (de_dust2
 /// 1455, cs_office 3672). The table is at most `4097 * 512` bytes (2 MiB), and the PVS matrix
 /// the build needs for a moment is the same size again. A map with more leaves hears
@@ -35,29 +40,18 @@ const MAX_PAS_LEAFS: usize = 4096;
 /// not only the memory.
 const MAX_PAS_WORK_BYTES: u64 = 128 << 20;
 
-/// The potentially audible set of every leaf (`CM_CalcPAS`, which ReHLDS calls from
-/// `SV_SpawnServer`; the original engine calls it `SV_CalcPHS`): the OR of the PVS of every
-/// leaf the leaf can see. One bit row per leaf number `0..=vis_leafs`, in the PVS bit layout
-/// (bit `n` of a row is leaf `n + 1`), `row_bytes` each; row 0, the solid leaf, hears
-/// everything.
-struct Pas {
+/// Uncompressed PVS bit rows for leaves `0..=vis_leafs` stored as flat `u64` words.
+/// Bit `n` (`word = n >> 6`, `bit = n & 63`) of row `leaf` indicates leaf `n + 1` is visible.
+struct PvsTable {
     vis_leafs: usize,
-    row_bytes: usize,
-    rows: Vec<u8>,
-    /// Row ORs the build did: the work done is `or_rows * row_bytes` byte ORs. Only tests
-    /// read it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    or_rows: u64,
+    words_per_row: usize,
+    rows: Vec<u64>,
+    /// True when leaf `leaf` had valid visibility data (`vis_offset >= 0`); false for solid leaf 0
+    /// or leaves without visibility data (which see everything).
+    has_vis: Vec<bool>,
 }
 
-impl Pas {
-    /// `CM_CalcPAS` (`rehlds/engine/cmodel.cpp`, read 2026-11-21): the PVS rows come from
-    /// [`BspMap::decompress_pvs`] (a leaf without visibility data sees every leaf, as
-    /// `mod_novis` does there), and each PAS row is its PVS row ORed with the PVS row of every
-    /// leaf in it. The table is stored as bit rows, `(vis_leafs + 1) * ceil(vis_leafs / 8)`
-    /// bytes, never more than `leafs * ceil(leafs / 8)`. `None` for a map without
-    /// visibility data, past [`MAX_PAS_LEAFS`] or needing more than [`MAX_PAS_WORK_BYTES`] of
-    /// byte ORs.
+impl PvsTable {
     fn build(bsp: &BspMap) -> Option<Self> {
         if bsp.visibility.is_empty() {
             return None;
@@ -67,59 +61,157 @@ impl Pas {
             .first()
             .map_or(bsp.leafs.len().saturating_sub(1), |m| m.vis_leafs.max(0) as usize)
             .min(bsp.leafs.len().saturating_sub(1));
+        if vis_leafs == 0 || vis_leafs > MAX_PVS_LEAFS {
+            return None;
+        }
+        let words_per_row = vis_leafs.div_ceil(64);
+        let mut rows = vec![0u64; (vis_leafs + 1) * words_per_row];
+        let mut has_vis = vec![false; vis_leafs + 1];
+
+        let fill_all_visible = |row: &mut [u64]| {
+            row.fill(u64::MAX);
+            let rem = vis_leafs & 63;
+            if rem != 0 && let Some(last) = row.last_mut() {
+                *last = (1u64 << rem) - 1;
+            }
+        };
+        fill_all_visible(&mut rows[..words_per_row]);
+
+        for leaf in 1..=vis_leafs {
+            let row = &mut rows[leaf * words_per_row..(leaf + 1) * words_per_row];
+            let Some(leaf_data) = bsp.leafs.get(leaf) else {
+                fill_all_visible(row);
+                continue;
+            };
+            if leaf_data.vis_offset < 0 {
+                fill_all_visible(row);
+                continue;
+            }
+            has_vis[leaf] = true;
+            let mut in_idx = leaf_data.vis_offset as usize;
+            let mut out_leaf = 0usize;
+            while out_leaf < vis_leafs && in_idx < bsp.visibility.len() {
+                let byte = bsp.visibility[in_idx];
+                in_idx += 1;
+                if byte == 0 {
+                    let Some(&run) = bsp.visibility.get(in_idx) else {
+                        break;
+                    };
+                    in_idx += 1;
+                    out_leaf += (run as usize) * 8;
+                } else {
+                    let shift = out_leaf & 63;
+                    let word_idx = out_leaf >> 6;
+                    let mut bits = u64::from(byte);
+                    if out_leaf + 8 > vis_leafs {
+                        let keep = vis_leafs - out_leaf;
+                        bits &= (1u64 << keep) - 1;
+                    }
+                    row[word_idx] |= bits << shift;
+                    out_leaf += 8;
+                }
+            }
+        }
+
+        Some(Self {
+            vis_leafs,
+            words_per_row,
+            rows,
+            has_vis,
+        })
+    }
+
+    #[inline]
+    fn row(&self, leaf: usize) -> Option<&[u64]> {
+        if leaf == 0 || leaf > self.vis_leafs || !self.has_vis[leaf] {
+            return None;
+        }
+        let start = leaf * self.words_per_row;
+        Some(&self.rows[start..start + self.words_per_row])
+    }
+}
+
+/// The potentially audible set of every leaf (`CM_CalcPAS`, which ReHLDS calls from
+/// `SV_SpawnServer`; the original engine calls it `SV_CalcPHS`): the OR of the PVS of every
+/// leaf the leaf can see. One bit row per leaf number `0..=vis_leafs`, in the PVS bit layout
+/// (bit `n` of a row is leaf `n + 1`), `words_per_row` `u64` words each; row 0, the solid leaf,
+/// hears everything.
+struct Pas {
+    vis_leafs: usize,
+    words_per_row: usize,
+    rows: Vec<u64>,
+    /// Row ORs the build did: the work done is `or_rows * ceil(vis_leafs / 8)` byte ORs. Only
+    /// tests read it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    or_rows: u64,
+}
+
+impl Pas {
+    /// `CM_CalcPAS` (`rehlds/engine/cmodel.cpp`, read 2026-11-21): each PAS row is its PVS row
+    /// ORed with the PVS row of every leaf in it, performed 64 leaves per iteration via `u64`
+    /// word ORs. `None` for a map without visibility data, past [`MAX_PAS_LEAFS`] or needing
+    /// more than [`MAX_PAS_WORK_BYTES`] of byte ORs.
+    #[cfg(test)]
+    fn build(bsp: &BspMap) -> Option<Self> {
+        let pvs = PvsTable::build(bsp)?;
+        Self::build_from_pvs(&pvs)
+    }
+
+    fn build_from_pvs(pvs: &PvsTable) -> Option<Self> {
+        let vis_leafs = pvs.vis_leafs;
         if vis_leafs == 0 || vis_leafs > MAX_PAS_LEAFS {
             return None;
         }
-        let row_bytes = vis_leafs.div_ceil(8);
-        let mut pvs = vec![0u8; (vis_leafs + 1) * row_bytes];
-        pvs[..row_bytes].fill(0xFF);
-        for leaf in 1..=vis_leafs {
-            let row = &mut pvs[leaf * row_bytes..(leaf + 1) * row_bytes];
-            for (n, _) in bsp
-                .decompress_pvs(leaf)
-                .iter()
-                .take(vis_leafs)
-                .enumerate()
-                .filter(|(_, v)| **v)
-            {
-                row[n >> 3] |= 1 << (n & 7);
-            }
-        }
-        let mut rows = pvs.clone();
+        let words_per_row = pvs.words_per_row;
+        let row_bytes = vis_leafs.div_ceil(8) as u64;
+        let mut rows = pvs.rows.clone();
         let mut or_rows = 0u64;
         for leaf in 1..=vis_leafs {
-            let own = leaf * row_bytes;
-            for n in 0..vis_leafs {
-                if pvs[own + (n >> 3)] & (1 << (n & 7)) == 0 {
-                    continue;
-                }
-                or_rows += 1;
-                if or_rows * row_bytes as u64 > MAX_PAS_WORK_BYTES {
-                    return None;
-                }
-                let src = (n + 1) * row_bytes;
-                for (d, s) in rows[own..own + row_bytes].iter_mut().zip(&pvs[src..src + row_bytes]) {
-                    *d |= s;
+            let own = leaf * words_per_row;
+            for w in 0..words_per_row {
+                let mut bits = pvs.rows[own + w];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let n = (w << 6) + bit;
+                    if n >= vis_leafs {
+                        break;
+                    }
+                    or_rows += 1;
+                    if or_rows * row_bytes > MAX_PAS_WORK_BYTES {
+                        return None;
+                    }
+                    let src = (n + 1) * words_per_row;
+                    for (d, s) in rows[own..own + words_per_row]
+                        .iter_mut()
+                        .zip(&pvs.rows[src..src + words_per_row])
+                    {
+                        *d |= *s;
+                    }
                 }
             }
         }
-        rows[..row_bytes].fill(0xFF);
+        rows[..words_per_row].fill(u64::MAX);
+        let rem = vis_leafs & 63;
+        if rem != 0 {
+            rows[words_per_row - 1] = (1u64 << rem) - 1;
+        }
         Some(Self {
             vis_leafs,
-            row_bytes,
+            words_per_row,
             rows,
             or_rows,
         })
     }
 
-    /// The row of `leaf` as one flag per leaf (flag `n` is leaf `n + 1`), the shape the leaf
-    /// tests take; `None` for a leaf that has no row.
-    fn audible_from(&self, leaf: usize) -> Option<Vec<bool>> {
+    /// The `u64` bitset row of `leaf` (bit `n` is leaf `n + 1`); `None` for a leaf without a row.
+    #[inline]
+    fn row(&self, leaf: usize) -> Option<&[u64]> {
         if leaf > self.vis_leafs {
             return None;
         }
-        let row = &self.rows[leaf * self.row_bytes..(leaf + 1) * self.row_bytes];
-        Some((0..self.vis_leafs).map(|n| row[n >> 3] & (1 << (n & 7)) != 0).collect())
+        let start = leaf * self.words_per_row;
+        Some(&self.rows[start..start + self.words_per_row])
     }
 }
 
@@ -135,6 +227,7 @@ impl ServerMap {
             submodel_count: bsp.models.len(),
             entities: bsp.entities.clone(),
             collision: Some(Arc::new(WorldCollision::from_bsp(&bsp))),
+            pvs: OnceLock::new(),
             pas: OnceLock::new(),
             vis: Some(bsp),
         })
@@ -151,6 +244,7 @@ impl ServerMap {
             entities: Vec::new(),
             vis: None,
             collision: None,
+            pvs: OnceLock::new(),
             pas: OnceLock::new(),
         }
     }
@@ -179,6 +273,13 @@ impl ServerMap {
         self.vis.as_deref()
     }
 
+    /// The pre-decompressed `u64` PVS table, built lazily once per map.
+    fn pvs_table(&self) -> Option<&PvsTable> {
+        self.pvs
+            .get_or_init(|| self.vis.as_deref().and_then(PvsTable::build))
+            .as_ref()
+    }
+
     /// Mins and maxs of the world model, which the area tree spans; a map without collision
     /// data spans the whole coordinate range.
     pub(crate) fn world_bounds(&self) -> (Vec3, Vec3) {
@@ -189,16 +290,14 @@ impl ServerMap {
             .unwrap_or(whole)
     }
 
-    /// The PVS of the leaf `eye` is in, bit `n` for leaf `n + 1`. `None` when the eye sees
-    /// everything: a map without visibility data, or an eye in a leaf without any (solid leaf
-    /// 0, outside the world).
-    pub(crate) fn viewer_pvs(&self, eye: Vec3) -> Option<Vec<bool>> {
+    /// Zero-allocation `u64` bitset PVS row for the leaf `eye` is in (bit `n` for leaf `n + 1`).
+    /// `None` when the eye sees everything: a map without visibility data, or an eye in a leaf
+    /// without any (solid leaf 0, outside the world).
+    pub(crate) fn viewer_pvs_row(&self, eye: Vec3) -> Option<&[u64]> {
         let bsp = self.vis.as_deref()?;
+        let table = self.pvs_table()?;
         let eye_leaf = bsp.find_leaf(eye);
-        let has_vis = eye_leaf != 0
-            && !bsp.visibility.is_empty()
-            && bsp.leafs.get(eye_leaf).is_some_and(|l| l.vis_offset >= 0);
-        has_vis.then(|| bsp.decompress_pvs(eye_leaf))
+        table.row(eye_leaf)
     }
 
     /// Whether a box with absolute corners `mins`/`maxs` is potentially visible from `eye`: any
@@ -210,19 +309,20 @@ impl ServerMap {
         let Some(bsp) = self.vis.as_deref() else {
             return true;
         };
-        let Some(pvs) = self.viewer_pvs(eye) else {
+        let Some(pvs) = self.viewer_pvs_row(eye) else {
             return true;
         };
-        find_touched_leafs(bsp, mins, maxs).visible(bsp, &pvs)
+        find_touched_leafs(bsp, mins, maxs).visible(bsp, pvs)
     }
 
-    /// Builds the PAS when the map is activated (ReHLDS `SV_SpawnServer` calls `CM_CalcPAS`
-    /// only for `maxclients > 1`, `rehlds/engine/sv_main.cpp`, read 2026-11-21): the work is
-    /// done here once, never inside a client frame. With one client, or when called again,
-    /// nothing is (re)built; everything is then audible.
+    /// Builds the PVS table and PAS when the map is activated (ReHLDS `SV_SpawnServer` calls
+    /// `CM_CalcPAS` only for `maxclients > 1`, `rehlds/engine/sv_main.cpp`, read 2026-11-21): the
+    /// work is done here once, never inside a client frame. With one client, or when called
+    /// again, nothing is (re)built; everything is then audible.
     pub fn calc_pas(&self, max_clients: u8) {
+        let pvs = self.pvs_table();
         let _ = self.pas.set(if max_clients > 1 {
-            self.vis.as_deref().and_then(Pas::build)
+            pvs.and_then(Pas::build_from_pvs)
         } else {
             None
         });
@@ -235,45 +335,44 @@ impl ServerMap {
 
     /// The PAS row of the leaf `point` is in, as the sound leaf of `SV_Multicast`; `None` when
     /// everyone hears: no PAS, a point outside the world or in solid (leaf 0).
-    pub(crate) fn pas_row(&self, point: Vec3) -> Option<&[u8]> {
+    pub(crate) fn pas_row(&self, point: Vec3) -> Option<&[u64]> {
         let (bsp, pas) = (self.vis.as_deref()?, self.pas()?);
         let leaf = bsp.find_leaf(point);
-        (leaf != 0 && leaf <= pas.vis_leafs)
-            .then(|| &pas.rows[leaf * pas.row_bytes..(leaf + 1) * pas.row_bytes])
+        (leaf != 0).then(|| pas.row(leaf)).flatten()
     }
 
-    /// The PVS of the leaf `point` is in, as the sound leaf of `SV_Multicast` (flag `n` is leaf
-    /// `n + 1`); `None` when everyone gets it: no visibility data, a point outside the world or
-    /// in solid (leaf 0).
-    pub(crate) fn pvs_row(&self, point: Vec3) -> Option<Vec<bool>> {
-        let bsp = self.vis.as_deref()?;
-        let leaf = bsp.find_leaf(point);
-        (leaf != 0 && !bsp.visibility.is_empty()).then(|| bsp.decompress_pvs(leaf))
+    /// The PVS row of the leaf `point` is in, as the sound leaf of `SV_Multicast` (bit `n` is
+    /// leaf `n + 1`); `None` when everyone gets it: no visibility data, a point outside the world
+    /// or in solid (leaf 0).
+    pub(crate) fn pvs_row(&self, point: Vec3) -> Option<&[u64]> {
+        self.viewer_pvs_row(point)
     }
 
     /// Whether the leaf of `listener` (the client's edict origin) is in the PVS `row`; a
     /// listener in leaf 0 gets it, as with [`pas_row_contains`](Self::pas_row_contains).
-    pub(crate) fn pvs_row_contains(&self, row: &[bool], listener: Vec3) -> bool {
+    pub(crate) fn pvs_row_contains(&self, row: &[u64], listener: Vec3) -> bool {
         let Some(bsp) = self.vis.as_deref() else {
             return true;
         };
         let leaf = bsp.find_leaf(listener);
-        leaf == 0 || row.get(leaf - 1).copied().unwrap_or(true)
+        if leaf == 0 || self.pvs_table().is_none_or(|t| leaf > t.vis_leafs) {
+            return true;
+        }
+        crate::world::pvs_bit(row, leaf - 1)
     }
 
     /// Whether the leaf of `listener` (the client's edict origin) is in the PAS row `row`
     /// (bit `leaf - 1`, `SV_ValidClientMulticast`). A listener in solid or outside the world
     /// (leaf 0) hears it; HLDS reads the byte before the row there.
-    pub(crate) fn pas_row_contains(&self, row: &[u8], listener: Vec3) -> bool {
+    pub(crate) fn pas_row_contains(&self, row: &[u64], listener: Vec3) -> bool {
         let Some(bsp) = self.vis.as_deref() else {
             return true;
         };
         let leaf = bsp.find_leaf(listener);
-        if leaf == 0 {
+        if leaf == 0 || self.pas().is_none_or(|p| leaf > p.vis_leafs) {
             return true;
         }
-        row.get((leaf - 1) >> 3)
-            .is_none_or(|byte| byte & (1 << ((leaf - 1) & 7)) != 0)
+        crate::world::pvs_bit(row, leaf - 1)
     }
 
     /// Whether a listener at `listener` (an edict origin) is in the PAS of the leaf of
@@ -297,22 +396,25 @@ impl ServerMap {
         if ear_leaf == 0 {
             return true;
         }
-        let Some(audible) = pas.audible_from(ear_leaf) else {
+        let Some(audible) = pas.row(ear_leaf) else {
             return true;
         };
-        find_touched_leafs(bsp, mins, maxs).visible(bsp, &audible)
+        find_touched_leafs(bsp, mins, maxs).visible(bsp, audible)
     }
 
     /// Whether leaf `to` is in the PAS of leaf `from`; for tests.
     #[cfg(test)]
     fn pas_leaf_audible(&self, from: usize, to: usize) -> Option<bool> {
-        self.pas()?.audible_from(from)?.get(to.checked_sub(1)?).copied()
+        let pas = self.pas()?;
+        let row = pas.row(from)?;
+        let bit = to.checked_sub(1)?;
+        (bit < pas.vis_leafs).then(|| crate::world::pvs_bit(row, bit))
     }
 
     /// Size of the PAS table in bytes, and the row ORs its build did; for tests.
     #[cfg(test)]
     fn pas_size(&self) -> Option<(usize, u64)> {
-        self.pas().map(|p| (p.rows.len(), p.or_rows))
+        self.pas().map(|p| (p.rows.len() * std::mem::size_of::<u64>(), p.or_rows))
     }
 
     /// A map around `bsp` without a file behind it, for tests.
@@ -322,6 +424,7 @@ impl ServerMap {
             submodel_count: bsp.models.len(),
             entities: Vec::new(),
             collision: Some(Arc::new(WorldCollision::from_bsp(&bsp))),
+            pvs: OnceLock::new(),
             pas: OnceLock::new(),
             vis: Some(bsp),
             ..Self::stub("test_bsp")
@@ -555,8 +658,32 @@ mod tests {
         map.calc_pas(2);
         // The map still works: leaf 1 sees leaf 2, and the rows are the clamped ones.
         let row = map.pvs_row(STRIP_POINTS[0]);
-        assert!(row.is_some_and(|r| r.len() <= 5 && r[1]));
+        assert!(row.is_some_and(|r| r.len() == 1 && crate::world::pvs_bit(r, 1)));
         assert!(map.can_hear_point(STRIP_POINTS[0], STRIP_POINTS[1]));
+    }
+
+    #[test]
+    fn bit_packed_pvs_matches_decompress_pvs_for_every_leaf() {
+        let Some((bsp, map)) = dust2() else {
+            return;
+        };
+        let table = map.pvs_table().expect("de_dust2 has visibility");
+        for leaf in 1..=table.vis_leafs {
+            let expected = bsp.decompress_pvs(leaf);
+            let row = table.row(leaf);
+            if bsp.leafs[leaf].vis_offset < 0 {
+                assert!(row.is_none());
+            } else {
+                let row = row.expect("leaf with vis_offset >= 0 has a row");
+                for (n, &exp) in expected.iter().enumerate().take(table.vis_leafs) {
+                    assert_eq!(
+                        crate::world::pvs_bit(row, n),
+                        exp,
+                        "leaf {leaf} bit {n}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -590,7 +717,8 @@ mod tests {
             };
             let leafs = bsp.leafs.len();
             let (bytes, or_rows) = map.pas_size().expect("the map has visibility data");
-            assert!(bytes <= leafs * leafs.div_ceil(8), "{name}: {bytes} bytes for {leafs} leafs");
+            let max_bytes = leafs * (leafs.div_ceil(64) * std::mem::size_of::<u64>());
+            assert!(bytes <= max_bytes, "{name}: {bytes} bytes for {leafs} leafs");
             println!("{name} PAS: {leafs} leafs, {bytes} bytes, {or_rows} row ORs");
         }
     }

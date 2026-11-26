@@ -15,7 +15,9 @@ use cs_bot::buy::{BuyContext, BuyPlan, decide_bot_buy};
 use cs_bot::combat::CombatInventory;
 use cs_bot::nav_gen::{NavGenConfig, NavLadderHint, NavWorld, NavZoneHint, NavZoneKind, generate_nav_mesh};
 use cs_bot::nav_mesh::NavMesh;
-use cs_bot::path::{NavPath, PathAction, PathCostParams, PathObstacles, find_path};
+use cs_bot::path::{
+    NavPath, PathAction, PathCostParams, PathObstacles, PathScratch, find_path_with_scratch,
+};
 use cs_bot::profile::{BotDifficulty, BotProfile, BotProfileDb, BotTeam, BotWeapon};
 use cs_bot::tactics::{
     BotJoinTeam, BotSettings, BotTacticalBrain, BotTacticalState, GroundPickup, GroundPickupKind,
@@ -253,6 +255,7 @@ pub(crate) struct BotManager {
     sound_events: Vec<SoundEvent>,
     next_quota_check: f64,
     slots: [Option<BotSlot>; MAX_PLAYERS],
+    path_scratch: PathScratch,
 }
 
 impl Default for BotManager {
@@ -279,6 +282,7 @@ impl Default for BotManager {
             sound_events: Vec::new(),
             next_quota_check: 0.0,
             slots: std::array::from_fn(|_| None),
+            path_scratch: PathScratch::new(),
         }
     }
 }
@@ -1341,6 +1345,7 @@ fn reachable_pickups_for_bot(
     obstacles: &PathObstacles,
     origin: Vec3,
     profile: &BotProfile,
+    scratch: &mut PathScratch,
 ) -> Vec<GroundPickup> {
     let Some(mesh) = mesh.filter(|m| !m.areas().is_empty()) else {
         return pickups.to_vec();
@@ -1358,7 +1363,7 @@ fn reachable_pickups_for_bot(
     let params = PathCostParams::default();
     let mut reachable = Vec::new();
     for (_, pickup) in ranked.into_iter().take(12) {
-        if find_path(mesh, origin, pickup.pos, &params, obstacles).is_some() {
+        if find_path_with_scratch(mesh, origin, pickup.pos, &params, obstacles, scratch).is_some() {
             reachable.push(pickup);
         }
     }
@@ -1543,6 +1548,7 @@ fn plan_and_steer_path(
     my_team: BotTeam,
     now: f64,
     yaw_deg: f32,
+    scratch: &mut PathScratch,
 ) -> (f32, f32, bool, bool, bool, bool) {
     let Some(mesh) = mesh.filter(|m| !m.areas().is_empty()) else {
         let (fwd, right) = world_dir_to_move((goal - origin).truncate(), yaw_deg);
@@ -1560,7 +1566,9 @@ fn plan_and_steer_path(
             danger_weight: 150.0 * (1.0 - bot.profile.aggression * 0.5),
             ..PathCostParams::default()
         };
-        if let Some(mut p) = find_path(mesh, origin, goal, &params, obstacles) {
+        if let Some(mut p) =
+            find_path_with_scratch(mesh, origin, goal, &params, obstacles, scratch)
+        {
             string_pull_engine_path(mesh, eng, &mut p);
             bot.path_wp_idx = usize::from(p.waypoints.len() > 1);
             bot.path = Some(p);
@@ -1938,6 +1946,7 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                     &obstacles,
                     hv.origin,
                     &profile,
+                    &mut g.bots.path_scratch,
                 )
             };
             let team_cant_buy = match my_team {
@@ -2037,6 +2046,7 @@ pub(crate) fn start_frame(g: &mut GameState, eng: &mut EngineApi<'_>) {
                         bot_team,
                         now,
                         cmd.yaw_deg,
+                        &mut g.bots.path_scratch,
                     );
                 g.bots.slots[slot] = Some(temp_bot);
 

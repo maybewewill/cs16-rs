@@ -93,6 +93,34 @@ pub(crate) struct EncodedEntity {
     record: Arc<DeltaRecord>,
 }
 
+/// Reusable scratch buffers held on [`crate::world::WorldLinks`] across server frames so
+/// `send_client_frames` avoids per-client heap allocations for candidate lists and entity arrays.
+pub(crate) struct FrameScratch {
+    /// Pre-filtered live modelled edicts for this server frame: `(edict_id, is_nodraw)`.
+    pub(crate) live_edicts: Vec<(EdictId, bool)>,
+    /// Reusable per-client `(edict_id, in_pvs)` candidate buffer.
+    pub(crate) pvs_candidates: Vec<(EdictId, bool)>,
+    /// Reusable `LinkSnapshot` for `FullPackCtx::viewer_leaves`.
+    pub(crate) viewer_leaves: LinkSnapshot,
+    /// Per-client accepted `GoldSrcEntityState` scratch vectors (indexed by slot).
+    pub(crate) slot_accepted: Vec<Vec<GoldSrcEntityState>>,
+}
+
+impl Default for FrameScratch {
+    fn default() -> Self {
+        Self {
+            live_edicts: Vec::new(),
+            pvs_candidates: Vec::new(),
+            viewer_leaves: LinkSnapshot {
+                leafnums: Vec::new(),
+                headnode: -1,
+                area: None,
+            },
+            slot_accepted: Vec::new(),
+        }
+    }
+}
+
 /// The last [`UPDATE_BACKUP`] updates sent to one client, by netchan sequence.
 #[derive(Debug, Clone)]
 pub struct FrameRing {
@@ -321,7 +349,36 @@ impl<G: GameDll> Server<G> {
     /// due update the rate holds back is choked: counted, and announced with `svc_choke` in the
     /// next update sent. A client still signing on is sent one datagram per frame, so that the
     /// packets it acknowledges let a lost reliable message be resent.
+    /// Pre-filters dead, world, unmodelled, and non-client `EF_NODRAW` edicts once per server
+    /// frame before iterating `0..max_clients`.
+    fn prefilter_frame_edicts(&mut self) {
+        let max_clients = u16::from(self.cfg.max_clients);
+        let out = &mut self.world.frame_scratch.live_edicts;
+        out.clear();
+        for (id, edict) in self.edicts.iter_live() {
+            let v = &edict.vars;
+            if id.index == 0 || v.modelindex == 0 {
+                continue;
+            }
+            let nodraw = (v.effects & EF_NODRAW) != 0;
+            if !nodraw || id.index <= max_clients {
+                out.push((id, nodraw));
+            }
+        }
+    }
+
     pub(crate) fn send_client_frames(&mut self, net: &mut dyn PacketTransport) {
+        let any_due_active = (0..usize::from(self.cfg.max_clients)).any(|index| {
+            let client = &self.clients[index];
+            !client.is_free()
+                && !client.fake
+                && client.state == ClientState::Active
+                && self.real_time >= client.next_update_at
+                && self.real_time >= client.clear_time
+        });
+        if any_due_active {
+            self.prefilter_frame_edicts();
+        }
         for slot in 0..self.cfg.max_clients {
             let index = usize::from(slot);
             let client = &self.clients[index];
@@ -411,6 +468,7 @@ impl<G: GameDll> Server<G> {
         let players = self.frame_players(&entities);
         self.drain_outbox();
         if self.clients[index].state != ClientState::Active {
+            self.recycle_slot_entities(index, entities);
             return None;
         }
 
@@ -579,7 +637,18 @@ impl<G: GameDll> Server<G> {
                 players,
             });
         }
-        Some(client.chan.build_packet(&payload))
+        let packet = client.chan.build_packet(&payload);
+        self.recycle_slot_entities(index, entities);
+        Some(packet)
+    }
+
+    fn recycle_slot_entities(&mut self, index: usize, mut entities: Vec<GoldSrcEntityState>) {
+        entities.clear();
+        let slots = &mut self.world.frame_scratch.slot_accepted;
+        if slots.len() <= index {
+            slots.resize_with(index + 1, Vec::new);
+        }
+        slots[index] = entities;
     }
 
     /// The start of `SV_WriteClientdataToMessage` (ReHLDS `sv_main.cpp`, read 2026-11-22): one
@@ -672,7 +741,7 @@ impl<G: GameDll> Server<G> {
     /// Whether entity `id` is potentially visible in `pvs` (`None`: the viewer sees all): by the
     /// leaves it was linked with, or, for an entity that was never linked, by the leaves its
     /// box `origin + mins..origin + maxs` touches.
-    fn entity_in_pvs(&self, pvs: Option<&[bool]>, id: EdictId, v: &EntVars) -> bool {
+    fn entity_in_pvs(&self, pvs: Option<&[u64]>, id: EdictId, v: &EntVars) -> bool {
         let (Some(bsp), Some(pvs)) = (self.map.bsp(), pvs) else {
             return true;
         };
@@ -692,6 +761,7 @@ impl<G: GameDll> Server<G> {
     /// `setup_visibility` may move it) and the game's `add_to_full_pack` decides, with the
     /// state it may edit ([`FullPackCtx`]). The caller drains the outbox.
     fn visible_entities(&mut self, slot: u8) -> Vec<GoldSrcEntityState> {
+        let index = usize::from(slot);
         let viewer = self.edicts.client(slot);
         let own_eye = self
             .edicts
@@ -705,33 +775,46 @@ impl<G: GameDll> Server<G> {
             .call_game_synced(|game, eng| game.setup_visibility(eng, slot))
             .filter(|p| p.is_finite())
             .unwrap_or(own_eye);
-        let pvs = self.map.viewer_pvs(eye);
         let max_clients_u8 = self.cfg.max_clients;
-        // The first two checks of the source's `AddToFullPack` (`EF_NODRAW` on another entity,
-        // no model) need no game state, so they are made here, before the state is copied; the
-        // world (edict 0) has a model but is never sent: the source starts at entity 1. The
-        // visibility test is made for every entity and handed to the game, which decides.
-        let candidates: Vec<(EdictId, bool)> = self
-            .edicts
-            .iter_live()
-            .filter(|(id, edict)| {
-                let v = &edict.vars;
-                id.index != 0
-                    && v.modelindex != 0
-                    && (*id == viewer || v.effects & EF_NODRAW == 0)
-            })
-            .map(|(id, edict)| {
-                (id, self.entity_in_pvs(pvs.as_deref(), id, &edict.vars))
-            })
-            .collect();
-        let viewer_leaves = self
-            .world
-            .link_snapshot(viewer)
-            .unwrap_or_else(|| LinkSnapshot { leafnums: Vec::new(), headnode: -1, area: None });
+
+        let mut candidates = std::mem::take(&mut self.world.frame_scratch.pvs_candidates);
+        candidates.clear();
+        {
+            let pvs = self.map.viewer_pvs_row(eye);
+            for &(id, nodraw) in &self.world.frame_scratch.live_edicts {
+                if nodraw && id != viewer {
+                    continue;
+                }
+                let Some(edict) = self.edicts.get(id) else {
+                    continue;
+                };
+                if edict.vars.modelindex == 0 {
+                    continue;
+                }
+                candidates.push((id, self.entity_in_pvs(pvs, id, &edict.vars)));
+            }
+        }
+
+        let mut viewer_leaves = std::mem::replace(
+            &mut self.world.frame_scratch.viewer_leaves,
+            LinkSnapshot {
+                leafnums: Vec::new(),
+                headnode: -1,
+                area: None,
+            },
+        );
+        self.world.fill_link_snapshot(viewer, &mut viewer_leaves);
+
         let hostflags = u8::from(self.client_has_lw(slot));
         let max_clients = u16::from(self.cfg.max_clients);
-        let mut accepted = Vec::new();
-        for (ent_id, in_pvs) in candidates {
+        let mut accepted = if index < self.world.frame_scratch.slot_accepted.len() {
+            std::mem::take(&mut self.world.frame_scratch.slot_accepted[index])
+        } else {
+            Vec::new()
+        };
+        accepted.clear();
+
+        for &(ent_id, in_pvs) in &candidates {
             let ent = ent_id.index;
             if ent > max_clients && accepted.len() >= MAX_PACKET_ENTITIES {
                 tracing::debug!(slot, "too many entities in the visible packet list");
@@ -755,6 +838,9 @@ impl<G: GameDll> Server<G> {
                 accepted.push(state);
             }
         }
+
+        self.world.frame_scratch.pvs_candidates = candidates;
+        self.world.frame_scratch.viewer_leaves = viewer_leaves;
         accepted
     }
 }

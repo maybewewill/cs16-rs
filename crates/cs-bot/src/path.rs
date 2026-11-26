@@ -214,6 +214,99 @@ struct ParentLink {
     has_breakable: bool,
 }
 
+impl ParentLink {
+    const EMPTY: Self = Self {
+        prev_idx: usize::MAX,
+        how: TraverseKind::Start,
+        ladder_idx: None,
+        has_door: false,
+        has_breakable: false,
+    };
+}
+
+/// Reusable generation-stamped A* scratch buffers (`O(1)` reset per search, zero per-query
+/// allocation in steady state).
+#[derive(Debug, Clone)]
+pub struct PathScratch {
+    g_score: Vec<f32>,
+    state_gen: Vec<u32>,
+    closed_gen: Vec<u32>,
+    parents: Vec<ParentLink>,
+    open: BinaryHeap<HeapEntry>,
+    chain: Vec<(usize, ParentLink)>,
+    generation: u32,
+}
+
+impl Default for PathScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PathScratch {
+    pub fn new() -> Self {
+        Self {
+            g_score: Vec::new(),
+            state_gen: Vec::new(),
+            closed_gen: Vec::new(),
+            parents: Vec::new(),
+            open: BinaryHeap::new(),
+            chain: Vec::new(),
+            generation: 0,
+        }
+    }
+
+    fn prepare(&mut self, n: usize) -> u32 {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.state_gen.fill(0);
+            self.closed_gen.fill(0);
+            self.generation = 1;
+        }
+        if self.g_score.len() < n {
+            self.g_score.resize(n, 0.0);
+            self.state_gen.resize(n, 0);
+            self.closed_gen.resize(n, 0);
+            self.parents.resize(n, ParentLink::EMPTY);
+        }
+        self.open.clear();
+        self.chain.clear();
+        self.generation
+    }
+
+    #[inline]
+    fn is_closed(&self, idx: usize, gen_id: u32) -> bool {
+        self.closed_gen[idx] == gen_id
+    }
+
+    #[inline]
+    fn mark_closed(&mut self, idx: usize, gen_id: u32) {
+        self.closed_gen[idx] = gen_id;
+    }
+
+    #[inline]
+    fn g_score(&self, idx: usize, gen_id: u32) -> f32 {
+        if self.state_gen[idx] == gen_id {
+            self.g_score[idx]
+        } else {
+            f32::INFINITY
+        }
+    }
+
+    #[inline]
+    fn set_open_node(&mut self, idx: usize, gen_id: u32, g: f32, parent: ParentLink) {
+        self.g_score[idx] = g;
+        self.state_gen[idx] = gen_id;
+        self.parents[idx] = parent;
+    }
+
+    #[inline]
+    fn parent(&self, idx: usize, gen_id: u32) -> Option<ParentLink> {
+        (self.state_gen[idx] == gen_id && self.parents[idx].prev_idx != usize::MAX)
+            .then_some(self.parents[idx])
+    }
+}
+
 /// Shortest path with default parameters and no dynamic obstacles.
 pub fn find_path_simple(mesh: &NavMesh, start: Vec3, goal: Vec3) -> Option<NavPath> {
     find_path(
@@ -236,6 +329,19 @@ pub fn find_path(
     params: &PathCostParams,
     obstacles: &PathObstacles,
 ) -> Option<NavPath> {
+    let mut scratch = PathScratch::new();
+    find_path_with_scratch(mesh, start, goal, params, obstacles, &mut scratch)
+}
+
+/// Zero-allocation A* pathfinder reusing generation-stamped buffers in `scratch`.
+pub fn find_path_with_scratch(
+    mesh: &NavMesh,
+    start: Vec3,
+    goal: Vec3,
+    params: &PathCostParams,
+    obstacles: &PathObstacles,
+    scratch: &mut PathScratch,
+) -> Option<NavPath> {
     let n = mesh.areas().len();
     if n == 0 {
         return None;
@@ -255,14 +361,10 @@ pub fn find_path(
         goal
     };
 
-    let mut g_score = vec![f32::INFINITY; n];
-    let mut closed = vec![false; n];
-    let mut parents: Vec<Option<ParentLink>> = vec![None; n];
-    let mut open = BinaryHeap::new();
-
-    g_score[start_idx] = 0.0;
+    let gen_id = scratch.prepare(n);
+    scratch.set_open_node(start_idx, gen_id, 0.0, ParentLink::EMPTY);
     let start_h = mesh.areas()[start_idx].center().distance(goal_pos_snapped);
-    open.push(HeapEntry {
+    scratch.open.push(HeapEntry {
         area_idx: start_idx,
         f_score: start_h,
     });
@@ -271,11 +373,11 @@ pub fn find_path(
     let mut closest_dist = start_h;
     let mut reached_goal = false;
 
-    while let Some(HeapEntry { area_idx: curr, .. }) = open.pop() {
-        if closed[curr] {
+    while let Some(HeapEntry { area_idx: curr, .. }) = scratch.open.pop() {
+        if scratch.is_closed(curr, gen_id) {
             continue;
         }
-        closed[curr] = true;
+        scratch.mark_closed(curr, gen_id);
 
         if Some(curr) == goal_idx_opt {
             closest_idx = curr;
@@ -285,12 +387,12 @@ pub fn find_path(
 
         let curr_area = &mesh.areas()[curr];
         let curr_center = curr_area.center();
-        let curr_g = g_score[curr];
+        let curr_g = scratch.g_score(curr, gen_id);
 
         // 1. Expand 4 cardinal directions.
         for dir in NavDir::ALL {
             for &next in mesh.adjacent_indices(curr, dir) {
-                if next == curr || closed[next] || mesh.is_area_blocked(next) {
+                if next == curr || scratch.is_closed(next, gen_id) || mesh.is_area_blocked(next) {
                     continue;
                 }
                 let next_area = &mesh.areas()[next];
@@ -332,21 +434,25 @@ pub fn find_path(
                     params,
                 );
                 let cand_g = curr_g + edge_cost;
-                if cand_g < g_score[next] {
+                if cand_g < scratch.g_score(next, gen_id) {
                     let h = next_center.distance(goal_pos_snapped);
                     if h < closest_dist {
                         closest_dist = h;
                         closest_idx = next;
                     }
-                    g_score[next] = cand_g;
-                    parents[next] = Some(ParentLink {
-                        prev_idx: curr,
-                        how,
-                        ladder_idx: None,
-                        has_door,
-                        has_breakable,
-                    });
-                    open.push(HeapEntry {
+                    scratch.set_open_node(
+                        next,
+                        gen_id,
+                        cand_g,
+                        ParentLink {
+                            prev_idx: curr,
+                            how,
+                            ladder_idx: None,
+                            has_door,
+                            has_breakable,
+                        },
+                    );
+                    scratch.open.push(HeapEntry {
                         area_idx: next,
                         f_score: cand_g + h,
                     });
@@ -372,7 +478,8 @@ pub fn find_path(
                     let Some(next) = mesh.area_index_by_id(top_id) else {
                         continue;
                     };
-                    if next == curr || closed[next] || mesh.is_area_blocked(next) {
+                    if next == curr || scratch.is_closed(next, gen_id) || mesh.is_area_blocked(next)
+                    {
                         continue;
                     }
                     let dist = ladder.length.max(25.0);
@@ -387,21 +494,25 @@ pub fn find_path(
                         params,
                     );
                     let cand_g = curr_g + edge_cost;
-                    if cand_g < g_score[next] {
+                    if cand_g < scratch.g_score(next, gen_id) {
                         let h = mesh.areas()[next].center().distance(goal_pos_snapped);
                         if h < closest_dist {
                             closest_dist = h;
                             closest_idx = next;
                         }
-                        g_score[next] = cand_g;
-                        parents[next] = Some(ParentLink {
-                            prev_idx: curr,
-                            how: TraverseKind::LadderUp,
-                            ladder_idx: Some(l_idx),
-                            has_door: false,
-                            has_breakable: false,
-                        });
-                        open.push(HeapEntry {
+                        scratch.set_open_node(
+                            next,
+                            gen_id,
+                            cand_g,
+                            ParentLink {
+                                prev_idx: curr,
+                                how: TraverseKind::LadderUp,
+                                ladder_idx: Some(l_idx),
+                                has_door: false,
+                                has_breakable: false,
+                            },
+                        );
+                        scratch.open.push(HeapEntry {
                             area_idx: next,
                             f_score: cand_g + h,
                         });
@@ -417,7 +528,7 @@ pub fn find_path(
                 let Some(next) = mesh.area_index_by_id(bot_id) else {
                     continue;
                 };
-                if next == curr || closed[next] || mesh.is_area_blocked(next) {
+                if next == curr || scratch.is_closed(next, gen_id) || mesh.is_area_blocked(next) {
                     continue;
                 }
                 let dist = ladder.length.max(25.0);
@@ -432,21 +543,25 @@ pub fn find_path(
                     params,
                 );
                 let cand_g = curr_g + edge_cost;
-                if cand_g < g_score[next] {
+                if cand_g < scratch.g_score(next, gen_id) {
                     let h = mesh.areas()[next].center().distance(goal_pos_snapped);
                     if h < closest_dist {
                         closest_dist = h;
                         closest_idx = next;
                     }
-                    g_score[next] = cand_g;
-                    parents[next] = Some(ParentLink {
-                        prev_idx: curr,
-                        how: TraverseKind::LadderDown,
-                        ladder_idx: Some(l_idx),
-                        has_door: false,
-                        has_breakable: false,
-                    });
-                    open.push(HeapEntry {
+                    scratch.set_open_node(
+                        next,
+                        gen_id,
+                        cand_g,
+                        ParentLink {
+                            prev_idx: curr,
+                            how: TraverseKind::LadderDown,
+                            ladder_idx: Some(l_idx),
+                            has_door: false,
+                            has_breakable: false,
+                        },
+                    );
+                    scratch.open.push(HeapEntry {
                         area_idx: next,
                         f_score: cand_g + h,
                     });
@@ -462,32 +577,39 @@ pub fn find_path(
         return Some(p);
     }
 
-    // Reconstruct reversed area chain.
-    let mut chain = Vec::new();
+    // Reconstruct reversed area chain using reusable scratch buffer.
     let mut cursor = closest_idx;
     while cursor != start_idx {
-        let link = parents[cursor]?;
-        chain.push((cursor, link));
+        let link = scratch.parent(cursor, gen_id)?;
+        scratch.chain.push((cursor, link));
         cursor = link.prev_idx;
     }
-    chain.reverse();
+    scratch.chain.reverse();
 
-    if chain.len() > MAX_PATH_SEGMENTS - 2 {
-        chain.truncate(MAX_PATH_SEGMENTS - 2);
+    if scratch.chain.len() > MAX_PATH_SEGMENTS - 2 {
+        scratch.chain.truncate(MAX_PATH_SEGMENTS - 2);
     }
 
-    let final_area = chain.last().map_or(start_idx, |(idx, _)| *idx);
+    let final_area = scratch.chain.last().map_or(start_idx, |(idx, _)| *idx);
     let end_pos = if reached_goal {
         goal_pos_snapped
     } else {
         mesh.areas()[final_area].closest_point(goal)
     };
 
-    let waypoints = build_waypoints(mesh, start_idx, start, &chain, final_area, end_pos, obstacles);
+    let waypoints = build_waypoints(
+        mesh,
+        start_idx,
+        start,
+        &scratch.chain,
+        final_area,
+        end_pos,
+        obstacles,
+    );
     Some(NavPath {
         waypoints,
         reached_goal,
-        total_cost: g_score[closest_idx],
+        total_cost: scratch.g_score(closest_idx, gen_id),
     })
 }
 
@@ -1043,5 +1165,54 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn path_scratch_reuse_and_generation_wraparound_match_fresh_find_path() {
+        let mut a1 = area_rect(1, 0.0, 100.0, 100.0, 200.0, 0.0);
+        let mut a2 = area_rect(2, 100.0, 0.0, 200.0, 100.0, 0.0);
+        let mut a3 = area_rect(3, 100.0, 200.0, 200.0, 300.0, 0.0);
+        let mut a4 = area_rect(4, 200.0, 100.0, 300.0, 200.0, 0.0);
+        let a5_isolated = area_rect(5, 500.0, 500.0, 600.0, 600.0, 0.0);
+
+        a1.connections[NavDir::North.as_index()] = vec![2];
+        a1.connections[NavDir::South.as_index()] = vec![3];
+        a2.connections[NavDir::South.as_index()] = vec![1];
+        a2.connections[NavDir::East.as_index()] = vec![4];
+        a3.connections[NavDir::North.as_index()] = vec![1];
+        a3.connections[NavDir::East.as_index()] = vec![4];
+        a4.connections[NavDir::West.as_index()] = vec![2, 3];
+
+        let mesh = NavMesh::from_nav_file(NavFile {
+            version: NAV_VERSION,
+            bsp_size: 1,
+            places: Vec::new(),
+            areas: vec![a1, a2, a3, a4, a5_isolated],
+            ladders: Vec::new(),
+        });
+
+        let mut scratch = PathScratch::new();
+        let params = PathCostParams::default();
+        let obs = PathObstacles::default();
+        let queries = [
+            (Vec3::new(50.0, 150.0, 0.0), Vec3::new(250.0, 150.0, 0.0)),
+            (Vec3::new(250.0, 150.0, 0.0), Vec3::new(50.0, 150.0, 0.0)),
+            (Vec3::new(50.0, 150.0, 0.0), Vec3::new(550.0, 550.0, 0.0)), // partial unreachable
+            (Vec3::new(150.0, 50.0, 0.0), Vec3::new(150.0, 250.0, 0.0)),
+        ];
+
+        for &(s, g) in &queries {
+            let fresh = find_path(&mesh, s, g, &params, &obs);
+            let reused = find_path_with_scratch(&mesh, s, g, &params, &obs, &mut scratch);
+            assert_eq!(reused, fresh);
+        }
+
+        // Force generation counter wraparound (`u32::MAX` -> `0` -> reset + `1`) and verify exact parity.
+        scratch.generation = u32::MAX;
+        for &(s, g) in &queries {
+            let fresh = find_path(&mesh, s, g, &params, &obs);
+            let reused = find_path_with_scratch(&mesh, s, g, &params, &obs, &mut scratch);
+            assert_eq!(reused, fresh);
+        }
     }
 }
