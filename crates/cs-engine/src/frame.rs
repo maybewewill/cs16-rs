@@ -6,17 +6,22 @@ use std::collections::BTreeMap;
 use cs_proto48::bitbuf::MsgWriter;
 use std::sync::Arc;
 
-use cs_proto48::delta::{DeltaMarks, DeltaRecord, GoldSrcEntityState, GoldSrcWeaponData};
-use cs_proto48::event::write_svc_event;
+use cs_proto48::delta::{
+    DeltaMarks, DeltaRecord, DeltaRegistry, GoldSrcClientData, GoldSrcEntityState,
+    GoldSrcWeaponData,
+};
+use cs_proto48::event::{WireEvent, write_svc_event};
 use cs_proto48::messages::{
-    EntityEncodeFn, WeaponDelta, WeaponRecords, entity_schema_name, weapon_records, wire_entity_type,
-    write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons, write_svc_pings,
-    write_svc_setangle, write_svc_packetentities_delta_encoded, write_svc_packetentities_full_encoded,
-    write_svc_time,
+    EntityEncodeFn, PreparedEntityOp, WeaponDelta, WeaponRecords, entity_schema_name,
+    prepare_packetentities_delta_ops, prepare_packetentities_full_ops, weapon_records,
+    wire_entity_type, write_svc_addangle, write_svc_choke, write_svc_clientdata_with_weapons,
+    write_svc_packetentities_delta_encoded, write_svc_packetentities_delta_prepared,
+    write_svc_packetentities_full_encoded, write_svc_packetentities_full_prepared, write_svc_pings,
+    write_svc_setangle, write_svc_time,
 };
 use cs_transport::{MAX_UDP_PACKET, PacketTransport};
 
-use crate::client::ClientState;
+use crate::client::{Client, ClientState};
 use crate::edict::{EdictId, EntVars};
 use crate::game::{FullPackCtx, GameDll, entity_state_from_vars};
 use crate::lifecycle::PINGS_INTERVAL_SECS;
@@ -91,6 +96,242 @@ pub(crate) struct EncodedEntity {
     state: GoldSrcEntityState,
     wire_type: u8,
     record: Arc<DeltaRecord>,
+}
+
+/// Minimum due active clients in one server frame before Stage-2 delta compression and `NetChan`
+/// framing fans out across scoped worker threads.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_SNAPSHOT_MIN_CLIENTS: usize = 4;
+
+/// Precomputed Stage-1 entity delta operations when the game DLL provides conditional encoders
+/// (`GameDll::delta_encode` requires `&mut self` and must execute sequentially in Stage 1).
+enum PreparedEntityPlan {
+    Full {
+        ops: Vec<PreparedEntityOp>,
+    },
+    Delta {
+        delta_seq: u8,
+        expected_count: u16,
+        ops: Vec<PreparedEntityOp>,
+    },
+}
+
+/// Self-contained Stage-1 snapshot capture for one due active client slot.
+///
+/// Stage 2 consumes `ClientFrameJob` alongside its disjoint `&mut Client` without touching
+/// `Server`'s game DLL, edict pool, or outbox, so multi-client delta compression and `NetChan`
+/// framing can run safely in parallel via `std::thread::scope`.
+struct ClientFrameJob {
+    rate: u32,
+    header_payload: MsgWriter,
+    client_data: GoldSrcClientData,
+    weapon_list: Option<Box<[GoldSrcWeaponData; 64]>>,
+    entities: Vec<GoldSrcEntityState>,
+    players: Vec<FramePlayer>,
+    pings_block: MsgWriter,
+    wire_events: Vec<WireEvent>,
+    queued_unreliable: Vec<u8>,
+    prepared_entities: Option<PreparedEntityPlan>,
+}
+
+/// Stage-2 encoded output for one active client slot, committed in deterministic `0..max_clients`
+/// order during Stage 3.
+struct ClientFrameOutcome {
+    packet: Vec<u8>,
+    entity_blocks_dropped: u64,
+    unreliable_dropped: u64,
+}
+
+enum SlotWork {
+    None,
+    Signon {
+        rate: u32,
+        packet: Vec<u8>,
+    },
+    Active {
+        job: Box<ClientFrameJob>,
+        outcome: Option<ClientFrameOutcome>,
+    },
+}
+
+/// Stage-2 pure per-client snapshot compression and `NetChan` framing. Runs either inline or
+/// concurrently across disjoint `(&mut Client, &mut ClientFrameJob)` pairs inside
+/// `std::thread::scope`.
+fn encode_client_frame_job(
+    client: &mut Client,
+    job: &mut ClientFrameJob,
+    deltas: &DeltaRegistry,
+    baseline_records: &BTreeMap<u16, (u8, DeltaRecord)>,
+    max_clients: u8,
+    sv_time: f64,
+    real_time: f64,
+) -> ClientFrameOutcome {
+    let mut payload = std::mem::replace(&mut job.header_payload, MsgWriter::new());
+    let pings_block = std::mem::replace(&mut job.pings_block, MsgWriter::new());
+    let players = std::mem::take(&mut job.players);
+    let queued = std::mem::take(&mut job.queued_unreliable);
+
+    let seq = client.chan.outgoing_sequence;
+    let base = client
+        .delta_seq
+        .and_then(|delta_seq| client.frames.delta_base(delta_seq, seq));
+
+    let mut weapondata = WeaponRecords::new();
+    let clientdata = match deltas.get("clientdata_t") {
+        Some(schema) => {
+            let weapon_schema = deltas.get("weapon_data_t");
+            if let (Some(ws), Some(list)) = (weapon_schema, job.weapon_list.as_deref()) {
+                weapondata = weapon_records(ws, list);
+            }
+            let no_weapons = WeaponRecords::new();
+            let weapons = weapon_schema
+                .zip(job.weapon_list.as_ref())
+                .map(|(schema, _)| WeaponDelta {
+                    schema,
+                    from: base.map_or(&no_weapons, |f| &f.weapondata),
+                    to: &weapondata,
+                });
+            write_svc_clientdata_with_weapons(
+                &mut payload,
+                schema,
+                base.map(|f| (low_byte(f.seq), &f.clientdata)),
+                &job.client_data,
+                weapons,
+                sv_time,
+            )
+        }
+        None => DeltaRecord::default(),
+    };
+
+    let mut block = MsgWriter::new();
+    match &job.prepared_entities {
+        Some(PreparedEntityPlan::Delta {
+            delta_seq,
+            expected_count,
+            ops,
+        }) => write_svc_packetentities_delta_prepared(
+            &mut block,
+            deltas,
+            max_clients,
+            *delta_seq,
+            *expected_count,
+            &job.entities,
+            ops,
+            sv_time,
+        ),
+        Some(PreparedEntityPlan::Full { ops }) => write_svc_packetentities_full_prepared(
+            &mut block,
+            deltas,
+            max_clients,
+            &job.entities,
+            ops,
+            sv_time,
+        ),
+        None => match base {
+            Some(from) => write_svc_packetentities_delta_encoded(
+                &mut block,
+                deltas,
+                max_clients,
+                low_byte(from.seq),
+                baseline_records,
+                &from.entities,
+                &job.entities,
+                sv_time,
+                None,
+            ),
+            None => write_svc_packetentities_full_encoded(
+                &mut block,
+                deltas,
+                max_clients,
+                baseline_records,
+                &job.entities,
+                sv_time,
+                None,
+            ),
+        },
+    }
+
+    let mut event_block = MsgWriter::new();
+    if let Some(schema) = deltas.get("event_t") {
+        write_svc_event(&mut event_block, schema, &job.wire_events, sv_time);
+    }
+
+    let reliable_len = client.chan.next_packet_reliable_len();
+    let budget = MAX_DATAGRAM.min(MAX_UDP_PACKET.saturating_sub(reliable_len));
+    let mut payload = payload.into_bytes();
+    let with_entities =
+        payload.len() + block.len() + event_block.len() + pings_block.len() <= budget;
+    let mut entity_blocks_dropped = 0u64;
+    let mut unreliable_dropped = 0u64;
+    if with_entities {
+        payload.extend_from_slice(block.as_slice());
+        payload.extend_from_slice(event_block.as_slice());
+        payload.extend_from_slice(pings_block.as_slice());
+        if payload.len() + queued.len() <= budget {
+            payload.extend_from_slice(&queued);
+        } else if !queued.is_empty() {
+            unreliable_dropped += 1;
+        }
+    } else {
+        entity_blocks_dropped += 1;
+        if !queued.is_empty() {
+            unreliable_dropped += 1;
+        }
+        payload.clear();
+    }
+
+    if with_entities {
+        // An entity in the same state as in the update before keeps its record (and the
+        // encoding is skipped).
+        let mut encoded = BTreeMap::new();
+        let mut stored = BTreeMap::new();
+        for state in &job.entities {
+            let known = client
+                .last_encoded
+                .remove(&state.number)
+                .filter(|known| known.state == *state);
+            let known = match known {
+                Some(known) => known,
+                None => {
+                    let wire_type = wire_entity_type(state.entity_type);
+                    let Some(schema) = deltas.get(entity_schema_name(
+                        state.number,
+                        wire_type,
+                        max_clients,
+                    )) else {
+                        continue;
+                    };
+                    EncodedEntity {
+                        state: state.clone(),
+                        wire_type,
+                        record: Arc::new(state.to_delta(schema)),
+                    }
+                }
+            };
+            stored.insert(
+                state.number,
+                (known.wire_type, Arc::clone(&known.record)),
+            );
+            encoded.insert(state.number, known);
+        }
+        client.last_encoded = encoded;
+        client.frames.store(ClientFrame {
+            seq,
+            entities: stored,
+            clientdata,
+            weapondata,
+            sent_at: real_time,
+            ping_time: -1.0,
+            players,
+        });
+    }
+
+    let packet = client.chan.build_packet(&payload);
+    ClientFrameOutcome {
+        packet,
+        entity_blocks_dropped,
+        unreliable_dropped,
+    }
 }
 
 /// Reusable scratch buffers held on [`crate::world::WorldLinks`] across server frames so
@@ -368,7 +609,26 @@ impl<G: GameDll> Server<G> {
     }
 
     pub(crate) fn send_client_frames(&mut self, net: &mut dyn PacketTransport) {
-        let any_due_active = (0..usize::from(self.cfg.max_clients)).any(|index| {
+        self.send_client_frames_with_mode(net, true);
+    }
+
+    /// Two-stage snapshot pipeline:
+    /// - **Stage 1 (sequential, `0..max_clients`):** pre-filters live edicts once, executes game
+    ///   hooks (`UpdateClientData`, `GetWeaponData`, `SetupVisibility`, `AddToFullPack`, optional
+    ///   `DeltaEncode`) and captures each due client's snapshot job.
+    /// - **Stage 2 (parallel when `allow_parallel && due_active >= 4` on native targets):** runs
+    ///   Protocol 48 delta bit-packing, `ClientFrame` storage, and `NetChan` packet framing
+    ///   concurrently across disjoint `(&mut Client, &mut ClientFrameJob)` pairs.
+    /// - **Stage 3 (sequential, `0..max_clients`):** recycles per-client scratch buffers,
+    ///   accumulates `net_stats`, advances `clear_time`/ping trackers, and transmits packets in
+    ///   deterministic slot order.
+    pub(crate) fn send_client_frames_with_mode(
+        &mut self,
+        net: &mut dyn PacketTransport,
+        allow_parallel: bool,
+    ) {
+        let max_clients = self.cfg.max_clients;
+        let any_due_active = (0..usize::from(max_clients)).any(|index| {
             let client = &self.clients[index];
             !client.is_free()
                 && !client.fake
@@ -379,30 +639,155 @@ impl<G: GameDll> Server<G> {
         if any_due_active {
             self.prefilter_frame_edicts();
         }
-        for slot in 0..self.cfg.max_clients {
+
+        // Stage 1: sequential game/engine capture in exact `0..max_clients` order.
+        let mut works = Vec::with_capacity(usize::from(max_clients));
+        for slot in 0..max_clients {
             let index = usize::from(slot);
             let client = &self.clients[index];
             // `SV_SendClientMessages` skips `fakeclient` (`sv_main.cpp` 5293): no update is
             // built, no event queue is kept, nothing is sent.
             if client.is_free() || client.fake {
+                works.push(SlotWork::None);
                 continue;
             }
             let can_send = self.real_time >= client.clear_time;
-            let packet = if client.state != ClientState::Active {
+            if client.state != ClientState::Active {
                 // A client that is not in the game is sent no events, and keeps none.
                 self.outbox.events[index].clear();
-                can_send.then(|| self.build_signon_packet(slot))
+                if can_send {
+                    let packet = self.build_signon_packet(slot);
+                    let rate = self.client_rate(slot);
+                    works.push(SlotWork::Signon { rate, packet });
+                } else {
+                    works.push(SlotWork::None);
+                }
             } else if self.real_time < client.next_update_at {
-                None
+                works.push(SlotWork::None);
             } else if can_send {
-                self.build_update(slot)
+                match self.capture_client_frame_job(slot) {
+                    Some(job) => works.push(SlotWork::Active {
+                        job: Box::new(job),
+                        outcome: None,
+                    }),
+                    None => works.push(SlotWork::None),
+                }
             } else {
                 self.choke_update(slot);
-                None
+                works.push(SlotWork::None);
+            }
+        }
+
+        // Stage 2: delta compression + `NetChan` framing across disjoint client slots.
+        {
+            let deltas = &self.deltas;
+            let baseline_records = &self.baseline_records;
+            let sv_time = self.sv_time;
+            let real_time = self.real_time;
+            #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+            let mut active_tasks: Vec<(
+                &mut Client,
+                &mut ClientFrameJob,
+                &mut Option<ClientFrameOutcome>,
+            )> = self
+                .clients
+                .iter_mut()
+                .zip(works.iter_mut())
+                .filter_map(|(client, work)| match work {
+                    SlotWork::Active { job, outcome } => Some((client, job.as_mut(), outcome)),
+                    _ => None,
+                })
+                .collect();
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if allow_parallel && active_tasks.len() >= PARALLEL_SNAPSHOT_MIN_CLIENTS {
+                let workers = std::thread::available_parallelism()
+                    .map(usize::from)
+                    .unwrap_or(4)
+                    .clamp(2, 8)
+                    .min(active_tasks.len());
+                let chunk_size = active_tasks.len().div_ceil(workers);
+                std::thread::scope(|scope| {
+                    let mut chunks = active_tasks.chunks_mut(chunk_size);
+                    let first = chunks.next();
+                    for chunk in chunks {
+                        scope.spawn(move || {
+                            for (client, job, outcome) in chunk {
+                                **outcome = Some(encode_client_frame_job(
+                                    client,
+                                    job,
+                                    deltas,
+                                    baseline_records,
+                                    max_clients,
+                                    sv_time,
+                                    real_time,
+                                ));
+                            }
+                        });
+                    }
+                    if let Some(chunk) = first {
+                        for (client, job, outcome) in chunk {
+                            **outcome = Some(encode_client_frame_job(
+                                client,
+                                job,
+                                deltas,
+                                baseline_records,
+                                max_clients,
+                                sv_time,
+                                real_time,
+                            ));
+                        }
+                    }
+                });
+            } else {
+                for (client, job, outcome) in active_tasks {
+                    *outcome = Some(encode_client_frame_job(
+                        client,
+                        job,
+                        deltas,
+                        baseline_records,
+                        max_clients,
+                        sv_time,
+                        real_time,
+                    ));
+                }
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = allow_parallel;
+                for (client, job, outcome) in active_tasks {
+                    *outcome = Some(encode_client_frame_job(
+                        client,
+                        job,
+                        deltas,
+                        baseline_records,
+                        max_clients,
+                        sv_time,
+                        real_time,
+                    ));
+                }
+            }
+        }
+
+        // Stage 3: deterministic commit and UDP transmit in `slot 0..max_clients` order.
+        for (index, work) in works.into_iter().enumerate() {
+            let (rate, packet) = match work {
+                SlotWork::None => continue,
+                SlotWork::Signon { rate, packet } => (rate, packet),
+                SlotWork::Active { job, outcome } => {
+                    let rate = job.rate;
+                    self.recycle_slot_entities(index, job.entities);
+                    let Some(outcome) = outcome else {
+                        continue;
+                    };
+                    self.net_stats.entity_blocks_dropped += outcome.entity_blocks_dropped;
+                    self.net_stats.unreliable_dropped += outcome.unreliable_dropped;
+                    (rate, outcome.packet)
+                }
             };
-            let rate = self.client_rate(slot);
             let client = &mut self.clients[index];
-            let (Some(packet), Some(addr)) = (packet, client.addr) else {
+            let Some(addr) = client.addr else {
                 continue;
             };
             client.clear_time =
@@ -430,20 +815,11 @@ impl<G: GameDll> Server<G> {
         client.chan.build_packet(&[])
     }
 
-    /// The due update of `slot`: `svc_time`, one `svc_choke` if any update was choked since the
-    /// last one sent, the forced view, `svc_clientdata` and the entity block, delta-encoded against the frame the
-    /// client acknowledged when there is one, `svc_event`, `svc_pings` (when `IN_SCORE` is held,
-    /// `SV_ShouldUpdatePing` throttled to `PINGS_INTERVAL_SECS`), followed by the queued unreliable
-    /// messages. The entity block counts at most [`MAX_PACKET_ENTITIES`] entities. When the block
-    /// does not fit the datagram the whole unreliable part is dropped (nothing is stored as a delta
-    /// base, the client gets the reliable data alone), as HLDS does: a `SV_SendClientDatagram`
-    /// (`rehlds/engine/sv_main.cpp`, read 2026-11-21) whose message overflowed is cleared
-    /// (`WARNING: msg overflowed`) and its netchan sends the reliable data alone; and
-    /// `Netchan_Transmit` (`net_chan.cpp`, read 2026-11-21) leaves the unreliable payload out
-    /// when it does not fit next to the reliable one (`Unreliable would overfow, ignoring`).
-    /// Queued unreliable messages that do not fit next to the block are dropped alone (the
-    /// `REHLDS_FIXES` rule). `None` when the game dropped the client meanwhile.
-    fn build_update(&mut self, slot: u8) -> Option<Vec<u8>> {
+    /// Stage 1 capture for one due active client slot: runs game hooks (`UpdateClientData`,
+    /// `GetWeaponData`, `SetupVisibility`, `AddToFullPack`, optional `DeltaEncode`), drains the
+    /// outbox/event/unreliable queues, and returns a self-contained [`ClientFrameJob`] ready for
+    /// Stage 2 encoding. Returns `None` if the game dropped the client meanwhile.
+    fn capture_client_frame_job(&mut self, slot: u8) -> Option<ClientFrameJob> {
         let index = usize::from(slot);
         let interval = self.client_update_interval(slot);
         let client = &mut self.clients[index];
@@ -451,14 +827,14 @@ impl<G: GameDll> Server<G> {
 
         // `SV_SendClientDatagram`: `svc_time`, then `SV_WriteClientdataToMessage`: the choke
         // byte and the forced view first, and only then the game is asked for the client data.
-        let mut payload = MsgWriter::new();
-        write_svc_time(&mut payload, self.sv_time as f32);
-        self.write_choke_and_fixangle(slot, &mut payload);
+        let mut header_payload = MsgWriter::new();
+        write_svc_time(&mut header_payload, self.sv_time as f32);
+        self.write_choke_and_fixangle(slot, &mut header_payload);
         let client_data = self.call_game(|game, eng| game.update_client_data(eng, slot));
         // The weapon list is asked for only when the client has `cl_lw`, and sent only if the
         // game filled it.
         let weapon_list = if self.client_has_lw(slot) {
-            let mut list = [GoldSrcWeaponData::default(); 64];
+            let mut list = Box::new([GoldSrcWeaponData::default(); 64]);
             self.call_game_synced(|game, eng| game.get_weapon_data(eng, slot, &mut list))
                 .then_some(list)
         } else {
@@ -492,154 +868,75 @@ impl<G: GameDll> Server<G> {
             }
         }
 
-        let max_clients = self.cfg.max_clients;
-        let client = &mut self.clients[index];
-        let seq = client.chan.outgoing_sequence;
-        let base = client
-            .delta_seq
-            .and_then(|delta_seq| client.frames.delta_base(delta_seq, seq));
-        let mut weapondata = WeaponRecords::new();
-        let clientdata = match self.deltas.get("clientdata_t") {
-            Some(schema) => {
-                let weapon_schema = self.deltas.get("weapon_data_t");
-                if let (Some(ws), Some(list)) = (weapon_schema, &weapon_list) {
-                    weapondata = weapon_records(ws, list);
-                }
-                let no_weapons = WeaponRecords::new();
-                let weapons = weapon_schema
-                    .zip(weapon_list.as_ref())
-                    .map(|(schema, _)| WeaponDelta {
-                        schema,
-                        from: base.map_or(&no_weapons, |f| &f.weapondata),
-                        to: &weapondata,
-                    });
-                write_svc_clientdata_with_weapons(
-                    &mut payload,
-                    schema,
-                    base.map(|f| (low_byte(f.seq), &f.clientdata)),
-                    &client_data,
-                    weapons,
-                    self.sv_time,
-                )
-            }
-            None => DeltaRecord::default(),
-        };
-        let mut block = MsgWriter::new();
-        // `ENGINE_CURRENT_PLAYER` of the game's conditional encoders is this client's slot.
-        let has_encoder = self.game.has_delta_encoder();
-        let game = &mut self.game;
-        let mut encode = |name: &str,
-                          from: &GoldSrcEntityState,
-                          to: &GoldSrcEntityState,
-                          marks: &mut DeltaMarks<'_>| {
-            game.delta_encode(name, slot, from, to, marks);
-        };
-        let encode = has_encoder.then_some(&mut encode as EntityEncodeFn<'_>);
-        match base {
-            Some(from) => write_svc_packetentities_delta_encoded(
-                &mut block,
-                &self.deltas,
-                max_clients,
-                low_byte(from.seq),
-                &self.baseline_records,
-                &from.entities,
-                &entities,
-                self.sv_time,
-                encode,
-            ),
-            None => write_svc_packetentities_full_encoded(
-                &mut block,
-                &self.deltas,
-                max_clients,
-                &self.baseline_records,
-                &entities,
-                self.sv_time,
-                encode,
-            ),
-        }
-
         // `SV_EmitEvents` (ReHLDS `rehlds/engine/sv_main.cpp`, read 2026-11-22): the events
         // queued for the client follow the packet entities. The queue is emptied whether or not
         // the datagram goes out, as there.
-        let mut event_block = MsgWriter::new();
         let numbers: Vec<u16> = entities.iter().map(|s| s.number).collect();
         let wire_events = self.outbox.events[index].take_wire_events(&numbers);
-        if let Some(schema) = self.deltas.get("event_t") {
-            write_svc_event(&mut event_block, schema, &wire_events, self.sv_time);
-        }
+        let queued_unreliable = std::mem::take(&mut self.clients[index].unreliable);
+        let rate = self.client_rate(slot);
 
-        let reliable_len = client.chan.next_packet_reliable_len();
-        let budget = MAX_DATAGRAM.min(MAX_UDP_PACKET.saturating_sub(reliable_len));
-        let mut payload = payload.into_bytes();
-        let queued = std::mem::take(&mut client.unreliable);
-        let with_entities =
-            payload.len() + block.len() + event_block.len() + pings_block.len() <= budget;
-        if with_entities {
-            payload.extend_from_slice(block.as_slice());
-            payload.extend_from_slice(event_block.as_slice());
-            payload.extend_from_slice(pings_block.as_slice());
-            if payload.len() + queued.len() <= budget {
-                payload.extend_from_slice(&queued);
-            } else if !queued.is_empty() {
-                self.net_stats.unreliable_dropped += 1;
-            }
-        } else {
-            self.net_stats.entity_blocks_dropped += 1;
-            if !queued.is_empty() {
-                self.net_stats.unreliable_dropped += 1;
-            }
-            payload.clear();
-        }
-
-        if with_entities {
-            // An entity in the same state as in the update before keeps its record (and the
-            // encoding is skipped).
-            let mut encoded = BTreeMap::new();
-            let mut stored = BTreeMap::new();
-            for state in &entities {
-                let known = client
-                    .last_encoded
-                    .remove(&state.number)
-                    .filter(|known| known.state == *state);
-                let known = match known {
-                    Some(known) => known,
-                    None => {
-                        let wire_type = wire_entity_type(state.entity_type);
-                        let Some(schema) = self.deltas.get(entity_schema_name(
-                            state.number,
-                            wire_type,
-                            max_clients,
-                        )) else {
-                            continue;
-                        };
-                        EncodedEntity {
-                            state: state.clone(),
-                            wire_type,
-                            record: Arc::new(state.to_delta(schema)),
-                        }
+        // When the game DLL defines conditional encoders (`GameDll::delta_encode`), evaluate the
+        // entity delta masks sequentially here so Stage 2 can bit-pack without `&mut self.game`.
+        let prepared_entities = if self.game.has_delta_encoder() {
+            let max_clients = self.cfg.max_clients;
+            let client = &self.clients[index];
+            let seq = client.chan.outgoing_sequence;
+            let base = client
+                .delta_seq
+                .and_then(|delta_seq| client.frames.delta_base(delta_seq, seq));
+            let game = &mut self.game;
+            let mut encode = |name: &str,
+                              from: &GoldSrcEntityState,
+                              to: &GoldSrcEntityState,
+                              marks: &mut DeltaMarks<'_>| {
+                game.delta_encode(name, slot, from, to, marks);
+            };
+            let encode = Some(&mut encode as EntityEncodeFn<'_>);
+            let plan = match base {
+                Some(from) => {
+                    let (expected_count, ops) = prepare_packetentities_delta_ops(
+                        &self.deltas,
+                        max_clients,
+                        &self.baseline_records,
+                        &from.entities,
+                        &entities,
+                        encode,
+                    );
+                    PreparedEntityPlan::Delta {
+                        delta_seq: low_byte(from.seq),
+                        expected_count,
+                        ops,
                     }
-                };
-                stored.insert(
-                    state.number,
-                    (known.wire_type, Arc::clone(&known.record)),
-                );
-                encoded.insert(state.number, known);
-            }
-            client.last_encoded = encoded;
-            let entities = stored;
-            client.frames.store(ClientFrame {
-                seq,
-                entities,
-                clientdata,
-                weapondata,
-                sent_at: self.real_time,
-                ping_time: -1.0,
-                players,
-            });
-        }
-        let packet = client.chan.build_packet(&payload);
-        self.recycle_slot_entities(index, entities);
-        Some(packet)
+                }
+                None => {
+                    let ops = prepare_packetentities_full_ops(
+                        &self.deltas,
+                        max_clients,
+                        &self.baseline_records,
+                        &entities,
+                        encode,
+                    );
+                    PreparedEntityPlan::Full { ops }
+                }
+            };
+            Some(plan)
+        } else {
+            None
+        };
+
+        Some(ClientFrameJob {
+            rate,
+            header_payload,
+            client_data,
+            weapon_list,
+            entities,
+            players,
+            pings_block,
+            wire_events,
+            queued_unreliable,
+            prepared_entities,
+        })
     }
 
     fn recycle_slot_entities(&mut self, index: usize, mut entities: Vec<GoldSrcEntityState>) {
@@ -952,5 +1249,288 @@ mod tests {
         assert_eq!(clamp_rate(Some("1"), &cfg), cfg.min_rate);
         assert_eq!(clamp_rate(Some("-5"), &cfg), cfg.min_rate);
         assert_eq!(clamp_rate(Some("9999999"), &cfg), cfg.max_rate);
+    }
+
+    #[derive(Default)]
+    struct CaptureTransport {
+        sent: Vec<(cs_transport::PeerAddr, Vec<u8>)>,
+    }
+
+    impl PacketTransport for CaptureTransport {
+        fn send(
+            &mut self,
+            to: cs_transport::PeerAddr,
+            data: &[u8],
+        ) -> Result<(), cs_transport::TransportError> {
+            self.sent.push((to, data.to_vec()));
+            Ok(())
+        }
+
+        fn recv(&mut self) -> Option<(cs_transport::PeerAddr, Vec<u8>)> {
+            None
+        }
+    }
+
+    struct DeterministicGame {
+        use_encoder: bool,
+        tick: u32,
+    }
+
+    impl GameDll for DeterministicGame {
+        fn usermsgs(&self) -> cs_proto48::usermsg::UserMsgRegistry {
+            cs_proto48::usermsg::UserMsgRegistry::cs16_default()
+        }
+
+        fn server_activate(&mut self, _eng: &mut crate::game::EngineApi<'_>) {}
+        fn server_deactivate(&mut self, _eng: &mut crate::game::EngineApi<'_>) {}
+        fn spawn_entity(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            _id: EdictId,
+            _classname: &str,
+            _keys: &[(String, String)],
+        ) -> bool {
+            true
+        }
+        fn client_connect(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            _slot: u8,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn client_put_in_server(&mut self, _eng: &mut crate::game::EngineApi<'_>, _slot: u8) {}
+        fn client_disconnect(&mut self, _eng: &mut crate::game::EngineApi<'_>, _slot: u8) {}
+        fn client_command(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            _slot: u8,
+            _argv: &[String],
+        ) {
+        }
+        fn client_userinfo_changed(&mut self, _eng: &mut crate::game::EngineApi<'_>, _slot: u8) {}
+        fn run_usercmd(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            _slot: u8,
+            _cmd: &cs_proto48::delta::GoldSrcUserCmd,
+            _random_seed: u32,
+        ) {
+        }
+        fn start_frame(&mut self, _eng: &mut crate::game::EngineApi<'_>, _frametime: f32) {}
+
+        fn update_client_data(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            slot: u8,
+        ) -> GoldSrcClientData {
+            GoldSrcClientData {
+                origin: glam::Vec3::new(
+                    f32::from(slot) * 64.0 + self.tick as f32 * 3.5,
+                    -120.0 + f32::from(slot) * 16.0,
+                    36.0,
+                ),
+                velocity: glam::Vec3::new(150.0, -25.0 * f32::from(slot), 0.0),
+                view_ofs: glam::Vec3::new(0.0, 0.0, 17.0),
+                health: 100.0 - f32::from(slot) * 5.0,
+                weapons: 0x0003_0005,
+                ammo_nails: 30 - self.tick as i32,
+                ..GoldSrcClientData::default()
+            }
+        }
+
+        fn get_weapon_data(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            slot: u8,
+            weapons: &mut [GoldSrcWeaponData; 64],
+        ) -> bool {
+            weapons[1] = GoldSrcWeaponData {
+                m_i_id: 1,
+                m_i_clip: 12 - (self.tick as i32 % 5),
+                m_fl_next_primary_attack: 0.25 + f32::from(slot) * 0.01,
+                ..GoldSrcWeaponData::default()
+            };
+            weapons[28] = GoldSrcWeaponData {
+                m_i_id: 28,
+                m_i_clip: 30 - (self.tick as i32 % 10),
+                m_fl_next_primary_attack: 0.5 + f32::from(slot) * 0.02,
+                ..GoldSrcWeaponData::default()
+            };
+            true
+        }
+
+        fn add_to_full_pack(
+            &mut self,
+            _eng: &mut crate::game::EngineApi<'_>,
+            ctx: &FullPackCtx<'_>,
+            state: &mut GoldSrcEntityState,
+        ) -> bool {
+            // Vary visibility per viewer and tick so full/delta removals, additions, and
+            // unchanged entities are all exercised across clients.
+            if ctx.ent > 12
+                && (ctx.ent + u16::from(ctx.viewer) + self.tick as u16).is_multiple_of(3)
+            {
+                return false;
+            }
+            state.frame = (self.tick as f32 * 4.0) % 256.0;
+            true
+        }
+
+        fn has_delta_encoder(&self) -> bool {
+            self.use_encoder
+        }
+
+        fn delta_encode(
+            &mut self,
+            schema_name: &str,
+            viewer: u8,
+            _from: &GoldSrcEntityState,
+            to: &GoldSrcEntityState,
+            marks: &mut DeltaMarks<'_>,
+        ) {
+            if schema_name == "entity_state_player_t" && to.number == u16::from(viewer) + 1 {
+                marks.unset_mask(marks.entity_animtime_mask());
+            }
+        }
+    }
+
+    fn build_deterministic_server(use_encoder: bool) -> Server<DeterministicGame> {
+        let cfg = ServerConfig {
+            max_clients: 10,
+            ..ServerConfig::default()
+        };
+        let mut server = Server::new(
+            cfg,
+            crate::map::ServerMap::stub("de_dust2"),
+            DeterministicGame {
+                use_encoder,
+                tick: 0,
+            },
+            DeltaRegistry::cs16_default(),
+            cs_cvar::CVarRegistry::new_with_defaults(),
+        );
+        // 8 active human clients (slots 0..8), 1 signon client (slot 8), 1 fake bot (slot 9).
+        for slot in 0..8u8 {
+            let idx = usize::from(slot);
+            let client = &mut server.clients[idx];
+            client.state = ClientState::Active;
+            client.addr = Some(cs_transport::PeerAddr::Loopback(u32::from(slot) + 1));
+            client.chan.outgoing_sequence = 10 + u32::from(slot);
+            client.next_update_at = 0.0;
+            client.clear_time = 0.0;
+            client.choke_count = u32::from(slot % 2);
+            if slot.is_multiple_of(2) {
+                client.last_cmd.buttons = IN_SCORE;
+            }
+            client.unreliable = vec![0x08, slot, 0xAA, 0xBB];
+            client.chan.write_reliable(&[0x08, b'r', b'e', b'l', slot]);
+            server.views[idx].active = true;
+            server.views[idx].userinfo =
+                cs_proto48::info::InfoString::parse("\\cl_lw\\1\\cl_updaterate\\20\\rate\\30000");
+
+            let eid = server.edicts.client(slot);
+            if let Some(ent) = server.edicts.get_mut(eid) {
+                ent.vars.modelindex = 2;
+                ent.vars.origin = glam::Vec3::new(f32::from(slot) * 96.0, 48.0, 0.0);
+                ent.vars.angles = glam::Vec3::new(0.0, f32::from(slot) * 30.0, 0.0);
+                ent.vars.health = 100.0;
+                ent.vars.fixangle = if slot == 3 { 1 } else if slot == 5 { 2 } else { 0 };
+                ent.vars.avelocity.y = 12.5;
+            }
+        }
+        // Slot 8: signing on.
+        server.clients[8].state = ClientState::Signon(crate::client::SignonStage::AwaitSpawn);
+        server.clients[8].addr = Some(cs_transport::PeerAddr::Loopback(9));
+        server.clients[8].chan.write_reliable(&[0x09, b's', b'i', b'g', b'n']);
+        // Slot 9: fake client (bot, skipped).
+        server.clients[9] = Client::fake_client(99, 0.0);
+
+        // Spawn 20 world / custom entities so each snapshot compresses a realistic entity set.
+        for i in 0..20u16 {
+            let id = server.edicts.alloc(1.0).expect("free edict");
+            if let Some(ent) = server.edicts.get_mut(id) {
+                ent.vars.modelindex = 3 + (i % 4);
+                ent.vars.origin = glam::Vec3::new(f32::from(i) * 32.0, -64.0, 12.0);
+                ent.vars.angles = glam::Vec3::new(0.0, f32::from(i) * 15.0, 0.0);
+                if i.is_multiple_of(5) {
+                    ent.vars.flags |= crate::world::consts::FL_CUSTOMENTITY;
+                }
+            }
+        }
+        server
+    }
+
+    fn advance_world_and_ack(server: &mut Server<DeterministicGame>, tick: u32) {
+        server.game.tick = tick;
+        server.real_time = 1.0 + f64::from(tick) * 0.1;
+        server.sv_time = 1.0 + f64::from(tick) * 0.1;
+        for slot in 0..8u8 {
+            let idx = usize::from(slot);
+            if tick > 0 {
+                // Acknowledge the previous snapshot so delta compression (`svc_deltapacketentities`)
+                // activates on frames 1 and 2.
+                let last_seq = server.clients[idx].chan.outgoing_sequence.wrapping_sub(1);
+                server.clients[idx].delta_seq = Some(low_byte(last_seq));
+                server.clients[idx].unreliable = vec![0x08, slot, tick as u8];
+            }
+            let eid = server.edicts.client(slot);
+            if let Some(ent) = server.edicts.get_mut(eid) {
+                ent.vars.origin.x += (tick as f32) * 12.0;
+                ent.vars.angles.y = (ent.vars.angles.y + 7.5) % 360.0;
+            }
+        }
+        for n in 11..=30u16 {
+            if n.is_multiple_of(2)
+                && let Some(id) = server.edicts.by_index(n).map(|(id, _)| id)
+                && let Some(ent) = server.edicts.get_mut(id)
+            {
+                ent.vars.origin.z += 1.25;
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_snapshot_compression_matches_sequential_byte_for_byte() {
+        for use_encoder in [false, true] {
+            let mut seq_srv = build_deterministic_server(use_encoder);
+            let mut par_srv = build_deterministic_server(use_encoder);
+
+            for tick in 0..4u32 {
+                advance_world_and_ack(&mut seq_srv, tick);
+                advance_world_and_ack(&mut par_srv, tick);
+
+                let mut seq_cap = CaptureTransport::default();
+                let mut par_cap = CaptureTransport::default();
+                seq_srv.send_client_frames_with_mode(&mut seq_cap, false);
+                par_srv.send_client_frames_with_mode(&mut par_cap, true);
+
+                assert_eq!(
+                    seq_cap.sent.len(),
+                    9,
+                    "expected 8 active + 1 signon datagrams (use_encoder={use_encoder}, tick={tick})"
+                );
+                assert_eq!(
+                    seq_cap.sent, par_cap.sent,
+                    "outgoing UDP packets diverged (use_encoder={use_encoder}, tick={tick})"
+                );
+                assert_eq!(seq_srv.net_stats, par_srv.net_stats);
+                for slot in 0..8usize {
+                    assert_eq!(
+                        seq_srv.clients[slot].clear_time.to_bits(),
+                        par_srv.clients[slot].clear_time.to_bits()
+                    );
+                    assert_eq!(
+                        seq_srv.clients[slot].chan.outgoing_sequence,
+                        par_srv.clients[slot].chan.outgoing_sequence
+                    );
+                    let last_seq = seq_srv.clients[slot].chan.outgoing_sequence.wrapping_sub(1);
+                    assert_eq!(
+                        seq_srv.clients[slot].frames.get(last_seq),
+                        par_srv.clients[slot].frames.get(last_seq)
+                    );
+                }
+            }
+        }
     }
 }
