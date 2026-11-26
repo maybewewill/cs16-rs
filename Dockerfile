@@ -6,7 +6,7 @@ ARG DEBIAN_IMAGE=debian:bookworm-slim
 FROM ${RUST_IMAGE} AS builder
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake g++ pkg-config \
+    && apt-get install -y --no-install-recommends cmake make g++ pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

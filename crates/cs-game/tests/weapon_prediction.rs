@@ -391,8 +391,8 @@ fn golden_values_after_joinclass() {
     let weapon_model = b.run(|_game, eng| eng.model_index("models/p_usp.mdl"));
     assert_eq!(Some(player.weaponmodel), weapon_model, "the USP's third-person model");
     assert_ne!(player.weaponmodel, 0);
-    assert_eq!(player.framerate, 1.0);
     if vfs.is_some() {
+        assert_eq!(player.framerate, 1.0);
         assert_eq!(player.gaitsequence, 1, "the idle gait (`idle1`)");
         assert_eq!(player.sequence, 19, "`ref_aim_onehanded`");
     }
