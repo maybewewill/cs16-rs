@@ -1,0 +1,13 @@
+description: "Counter-Strike 1.6 & GoldSrc Protocol 48 rewritten in 100% Safe Rust (#![forbid(unsafe_code)]) — native & WebGPU/WASM PWA, retail hl.exe/hlds.exe compatible, 5-language sandboxed modding (Rust/C++/Go/Python/AMXX)."
+homepage: "https://maybewewill.github.io/cs16-rs/"
+topics:
+  - rust
+  - counter-strike
+  - cs16
+  - goldsrc
+  - webgpu
+  - wasm
+  - gamedev
+  - wgpu
+  - webrtc
+  - modding

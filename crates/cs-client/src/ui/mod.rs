@@ -288,7 +288,8 @@ pub struct KeyDisplayState {
     pub duck: bool,
 }
 
-/// Draw `cl_showspeed 1` horizontal XY speed (`u/s`) centered above the bottom HUD bar.
+/// Draw `cl_showspeed 1` horizontal XY speed (`u/s`) centered above the bottom HUD bar
+/// in authentic CS 1.6 `ClientScheme` HUD amber `(255, 160, 0)` with crisp 0px styling.
 pub fn draw_showspeed(ctx: &egui::Context, cvars: &CVarRegistry, speed_xy: f32) {
     if cvars.get_f32("cl_showspeed") == 0.0 {
         return;
@@ -300,24 +301,25 @@ pub fn draw_showspeed(ctx: &egui::Context, cvars: &CVarRegistry, speed_xy: f32) 
     ));
     let font = FontId::monospace(14.0);
     let label = format!("{:.0} u/s", speed_xy.max(0.0));
-    let pos = Pos2::new(screen.center().x, screen.bottom() - 82.0);
+    let pos = Pos2::new(screen.center().x.floor(), (screen.bottom() - 82.0).floor());
     painter.text(
         pos + egui::vec2(1.0, 1.0),
         egui::Align2::CENTER_BOTTOM,
         &label,
         font.clone(),
-        Color32::from_black_alpha(220),
+        Color32::from_black_alpha(230),
     );
     painter.text(
         pos,
         egui::Align2::CENTER_BOTTOM,
         &label,
         font,
-        Color32::from_rgb(255, 200, 80),
+        Color32::from_rgb(255, 160, 0),
     );
 }
 
-/// Draw `cl_showkeys 1` live `W A S D  JUMP  DUCK` indicator above the bottom HUD bar.
+/// Draw `cl_showkeys 1` live `W A S D  JUMP  DUCK` indicator above the bottom HUD bar
+/// using authentic `ClientScheme.res` sharp 0px dark boxes and `1px` amber borders.
 pub fn draw_showkeys(ctx: &egui::Context, cvars: &CVarRegistry, keys: &KeyDisplayState) {
     if cvars.get_f32("cl_showkeys") == 0.0 {
         return;
@@ -327,38 +329,57 @@ pub fn draw_showkeys(ctx: &egui::Context, cvars: &CVarRegistry, keys: &KeyDispla
         egui::Order::Foreground,
         egui::Id::unique("cs16_cl_showkeys"),
     ));
-    let font = FontId::monospace(12.0);
-    let items = [
-        ("W", keys.forward),
-        ("A", keys.left),
-        ("S", keys.back),
-        ("D", keys.right),
-        ("JUMP", keys.jump),
-        ("DUCK", keys.duck),
+    let font = FontId::monospace(11.5);
+    let items: [(&str, bool, f32); 6] = [
+        ("W", keys.forward, 22.0),
+        ("A", keys.left, 22.0),
+        ("S", keys.back, 22.0),
+        ("D", keys.right, 22.0),
+        ("JUMP", keys.jump, 42.0),
+        ("DUCK", keys.duck, 42.0),
     ];
-    let text = items
-        .iter()
-        .map(|(lbl, on)| if *on { format!("[{lbl}]") } else { format!(" {lbl} ") })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let pos = Pos2::new(screen.center().x, screen.bottom() - 102.0);
-    painter.text(
-        pos + egui::vec2(1.0, 1.0),
-        egui::Align2::CENTER_BOTTOM,
-        &text,
-        font.clone(),
-        Color32::from_black_alpha(220),
-    );
-    painter.text(
-        pos,
-        egui::Align2::CENTER_BOTTOM,
-        &text,
-        font,
-        Color32::WHITE,
-    );
+    let gap = 3.0;
+    let total_w: f32 = items.iter().map(|(_, _, w)| *w).sum::<f32>() + gap * (items.len() as f32 - 1.0);
+    let box_h = 18.0;
+    let mut x = (screen.center().x - total_w * 0.5).floor();
+    let top_y = (screen.bottom() - 102.0 - box_h).floor();
+    let bg_idle = Color32::from_rgba_unmultiplied(0, 0, 0, 153);
+    let bg_active = Color32::from_rgba_unmultiplied(0, 0, 0, 195);
+    let border_idle = Color32::from_rgba_unmultiplied(188, 112, 0, 128);
+    let border_active = Color32::from_rgb(255, 160, 0);
+    let text_idle = Color32::from_rgb(176, 176, 176);
+    let text_active = Color32::from_rgb(255, 180, 30);
+
+    for (lbl, on, w) in items {
+        let r = egui::Rect::from_min_size(Pos2::new(x, top_y), egui::vec2(w, box_h));
+        painter.rect(
+            r,
+            egui::CornerRadius::ZERO,
+            if on { bg_active } else { bg_idle },
+            egui::Stroke::new(1.0, if on { border_active } else { border_idle }),
+            egui::StrokeKind::Inside,
+        );
+        let center = Pos2::new(r.center().x.floor(), r.center().y.floor());
+        painter.text(
+            center + egui::vec2(1.0, 1.0),
+            egui::Align2::CENTER_CENTER,
+            lbl,
+            font.clone(),
+            Color32::from_black_alpha(220),
+        );
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            lbl,
+            font.clone(),
+            if on { text_active } else { text_idle },
+        );
+        x += w + gap;
+    }
 }
 
-/// Draw `cl_ljstats 1` latest completed Kreedz jump summary above the speed/keys HUD.
+/// Draw `cl_ljstats 1` latest completed Kreedz jump summary above the speed/keys HUD
+/// in an authentic `ClientScheme.res` translucent dark box with `1px` amber border and `con_color` text.
 pub fn draw_ljstats(
     ctx: &egui::Context,
     cvars: &CVarRegistry,
@@ -380,22 +401,41 @@ pub fn draw_ljstats(
         egui::Order::Foreground,
         egui::Id::unique("cs16_cl_ljstats"),
     ));
-    let font = FontId::monospace(13.0);
+    let font = FontId::monospace(12.5);
     let label = stats.format_summary();
-    let pos = Pos2::new(screen.center().x, screen.bottom() - 122.0);
+    let galley = painter.layout_no_wrap(label.clone(), font.clone(), Color32::from_rgb(255, 180, 30));
+    let pad_x = 8.0;
+    let pad_y = 3.0;
+    let box_w = (galley.size().x + pad_x * 2.0).ceil();
+    let box_h = (galley.size().y + pad_y * 2.0).ceil();
+    let rect = egui::Rect::from_min_size(
+        Pos2::new(
+            (screen.center().x - box_w * 0.5).floor(),
+            (screen.bottom() - 126.0 - box_h).floor(),
+        ),
+        egui::vec2(box_w, box_h),
+    );
+    painter.rect(
+        rect,
+        egui::CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 165),
+        egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(188, 112, 0, 145)),
+        egui::StrokeKind::Inside,
+    );
+    let pos = Pos2::new(rect.center().x.floor(), rect.center().y.floor());
     painter.text(
         pos + egui::vec2(1.0, 1.0),
-        egui::Align2::CENTER_BOTTOM,
+        egui::Align2::CENTER_CENTER,
         &label,
         font.clone(),
-        Color32::from_black_alpha(220),
+        Color32::from_black_alpha(230),
     );
     painter.text(
         pos,
-        egui::Align2::CENTER_BOTTOM,
+        egui::Align2::CENTER_CENTER,
         &label,
         font,
-        Color32::from_rgb(110, 235, 160),
+        Color32::from_rgb(255, 180, 30),
     );
 }
 

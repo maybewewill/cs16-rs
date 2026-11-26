@@ -16,10 +16,14 @@ const assetStatusEl = document.getElementById('asset-status');
 const mapSelect = document.getElementById('map-select');
 const botsInput = document.getElementById('bots-count');
 const wsUrlInput = document.getElementById('ws-url');
+const wsMixedHintEl = document.getElementById('ws-mixed-hint');
 const masterUrlInput = document.getElementById('master-url');
 const serverListSelect = document.getElementById('server-list');
 const p2pMaxPlayersSelect = document.getElementById('p2p-max-players');
 const panelEl = document.getElementById('control-panel');
+const hostingModeBadgeEl = document.getElementById('hosting-mode-badge');
+const onboardingCardEl = document.getElementById('onboarding-card');
+const adminLinkEl = document.getElementById('link-admin');
 
 let cs16Web = null;
 let net = null;
@@ -27,6 +31,7 @@ let p2pHost = null;
 let audio = null;
 let input = null;
 let pendingP2pInvite = null;
+let hostingMode = { kind: 'static-https', isStaticPages: false, isHttps: false };
 
 function setStatus(text) {
   if (statusEl) statusEl.textContent = text;
@@ -34,6 +39,69 @@ function setStatus(text) {
 
 function setAssetStatus(text) {
   if (assetStatusEl) assetStatusEl.textContent = text;
+}
+
+function detectHostingMode(loc) {
+  const host = String(loc?.hostname || '').toLowerCase();
+  const protocol = String(loc?.protocol || '').toLowerCase();
+  const isHttps = protocol === 'https:';
+  const isStaticPages =
+    host.endsWith('.github.io') ||
+    host.endsWith('.pages.dev') ||
+    host.endsWith('.netlify.app') ||
+    host.endsWith('.vercel.app') ||
+    protocol === 'file:';
+  if (isStaticPages) {
+    return { kind: isHttps ? 'static-https' : 'static-local', isStaticPages: true, isHttps };
+  }
+  return { kind: 'self-hosted', isStaticPages: false, isHttps };
+}
+
+function updateMixedContentHint(rawUrl) {
+  if (!wsMixedHintEl) return;
+  const val = String(rawUrl || '').trim();
+  const isHttps = window.location.protocol === 'https:';
+  if (isHttps && /^ws:\/\//i.test(val)) {
+    wsMixedHintEl.innerHTML =
+      'Browser Mixed Content blocks insecure <code>ws://</code> from an <code>https://</code> page. ' +
+      'Use a TLS <code>wss://</code> server/relay URL, or open your local server directly at ' +
+      '<code>http://127.0.0.1:27016/</code>.';
+    wsMixedHintEl.classList.remove('hidden');
+  } else {
+    wsMixedHintEl.textContent = '';
+    wsMixedHintEl.classList.add('hidden');
+  }
+}
+
+function applyDualModeDefaults(invite) {
+  hostingMode = detectHostingMode(window.location);
+  const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+
+  if (hostingMode.isStaticPages) {
+    if (hostingModeBadgeEl) {
+      hostingModeBadgeEl.textContent = hostingMode.isHttps ? 'GitHub Pages / HTTPS' : 'Static Launcher';
+    }
+    if (onboardingCardEl) onboardingCardEl.classList.remove('hidden');
+    if (adminLinkEl) adminLinkEl.style.display = 'none';
+    if (wsUrlInput && !invite.wsUrl) {
+      wsUrlInput.value = '';
+      wsUrlInput.placeholder = 'wss://your-server.example/ws or P2P invite link';
+    }
+    if (masterUrlInput) {
+      masterUrlInput.value = '';
+      masterUrlInput.placeholder = 'https://master.example/servers (optional signaling/master)';
+    }
+  } else {
+    if (hostingModeBadgeEl) hostingModeBadgeEl.textContent = 'Self-Hosted Server';
+    if (adminLinkEl) adminLinkEl.style.display = 'inline-block';
+    if (wsUrlInput && !invite.wsUrl && window.location.host) {
+      wsUrlInput.value = `${wsScheme}://${window.location.host}/ws`;
+    }
+    if (masterUrlInput && window.location.origin && window.location.origin !== 'null') {
+      masterUrlInput.value = `${window.location.origin}/servers`;
+    }
+  }
+  updateMixedContentHint(wsUrlInput?.value || '');
 }
 
 function parseInviteParams(search, pageProtocol, pageOrigin = '') {
@@ -75,12 +143,12 @@ function closeActiveTransports() {
 }
 
 function resolveSignalOrigin() {
-  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
-    return window.location.origin;
-  }
   const master = masterUrlInput?.value?.trim() || '';
   if (/^https?:\/\//i.test(master)) {
     return master.replace(/\/(servers|lobbies)\/?$/i, '').replace(/\/+$/, '');
+  }
+  if (!hostingMode.isStaticPages && (window.location.protocol === 'http:' || window.location.protocol === 'https:')) {
+    return window.location.origin;
   }
   return '';
 }
@@ -88,6 +156,11 @@ function resolveSignalOrigin() {
 async function connectToWsUrl(url) {
   const trimmed = String(url || '').trim();
   if (!trimmed) return;
+  updateMixedContentHint(trimmed);
+  if (window.location.protocol === 'https:' && /^ws:\/\//i.test(trimmed)) {
+    setStatus('Blocked by HTTPS Mixed Content — use wss:// or local http://');
+    return;
+  }
   audio?.unlock();
   cs16Web?.unlockAudio?.();
   closeActiveTransports();
@@ -161,6 +234,18 @@ function ensureSize() {
 }
 
 async function main() {
+  const invite = parseInviteParams(
+    window.location.search,
+    window.location.protocol,
+    window.location.origin
+  );
+  applyDualModeDefaults(invite);
+  if (invite.wsUrl && wsUrlInput) {
+    wsUrlInput.value = invite.wsUrl;
+    updateMixedContentHint(invite.wsUrl);
+  }
+  wsUrlInput?.addEventListener('input', () => updateMixedContentHint(wsUrlInput.value));
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
@@ -198,15 +283,6 @@ async function main() {
     }
   });
 
-  const invite = parseInviteParams(
-    window.location.search,
-    window.location.protocol,
-    window.location.origin
-  );
-  if (invite.wsUrl && wsUrlInput) {
-    wsUrlInput.value = invite.wsUrl;
-  }
-
   const cached = await hydrateAssetsFromDb(
     (p, b) => cs16Web.mountFile?.(p, b),
     (n) => setAssetStatus(`Loading cached assets (${n})...`)
@@ -214,7 +290,7 @@ async function main() {
   if (cached > 0) {
     cs16Web.finishMount?.();
     refreshMaps();
-    setAssetStatus(`Restored ${cached} cached assets`);
+    setAssetStatus(`Restored ${cached} cached assets (${cs16Web.listMaps?.().length || 0} maps)`);
   }
   if (invite.p2pRoom && invite.signalOrigin) {
     if (cached > 0) {
@@ -284,7 +360,7 @@ async function main() {
     cs16Web.unlockAudio?.();
     closeActiveTransports();
     const map = mapSelect?.value || 'de_dust2';
-    const bots = Math.max(0, Math.min(15, Number(botsInput?.value || 4)));
+    const bots = Math.max(0, Math.min(15, Number(botsInput?.value || 9)));
     cs16Web.startLocal?.(map, bots);
     panelEl?.classList.add('collapsed');
     input.lockPointer();
@@ -300,7 +376,7 @@ async function main() {
     const bots = Math.max(0, Math.min(maxPlayers - 1, Number(botsInput?.value || 0)));
     const signalOrigin = resolveSignalOrigin();
     if (!signalOrigin) {
-      setStatus('P2P host needs HTTP(S) signaling origin (run cs-server --web-port)');
+      setStatus('Enter a signaling/master HTTPS URL above (or host via cs-server --web-port)');
       return;
     }
     const ok = cs16Web.startP2pHost?.(map, bots, maxPlayers);
@@ -353,7 +429,11 @@ async function main() {
         return;
       }
     }
-    await connectToWsUrl(url);
+    try {
+      await connectToWsUrl(url);
+    } catch (err) {
+      setStatus(`Connect failed: ${err.message}`);
+    }
   });
 
   document.getElementById('btn-disconnect')?.addEventListener('click', () => {
@@ -365,7 +445,10 @@ async function main() {
 
   document.getElementById('btn-refresh-servers')?.addEventListener('click', async () => {
     const endpoint = masterUrlInput?.value?.trim();
-    if (!endpoint || !serverListSelect) return;
+    if (!endpoint || !serverListSelect) {
+      setStatus('Enter a master/server directory URL first');
+      return;
+    }
     setStatus('Querying master server...');
     try {
       const resp = await fetch(endpoint);
@@ -413,6 +496,7 @@ async function main() {
         }
         if (wsUrlInput && serverListSelect.options[0]?.value) {
           wsUrlInput.value = serverListSelect.options[0].value;
+          updateMixedContentHint(wsUrlInput.value);
         }
       }
       setStatus(`Master: ${hasServers ? list.length : 0} server(s), ${lobbies.length} lobby(s)`);
@@ -424,6 +508,7 @@ async function main() {
   serverListSelect?.addEventListener('change', () => {
     if (wsUrlInput && serverListSelect.value) {
       wsUrlInput.value = serverListSelect.value;
+      updateMixedContentHint(wsUrlInput.value);
     }
   });
 

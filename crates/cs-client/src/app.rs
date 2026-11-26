@@ -66,7 +66,7 @@ use cs_client::ui::server_menu::{
 };
 use cs_client::ui::vgui2::{VguiRuntime, install_scheme_fonts_into_egui};
 use cs_client::ui::vgui_assets::VguiAssetBank;
-use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme};
+use cs_client::ui::vgui_theme::{VguiPalette, apply_vgui2_theme, paint_vgui_bevel};
 use cs_client::ui::{
     CrosshairInputs, CrosshairState, FrameTelemetry, KeyDisplayState, draw_crosshair_vgui,
     draw_ljstats, draw_net_graph_with_telemetry, draw_r_speeds, draw_showkeys, draw_showpos,
@@ -76,6 +76,19 @@ use cs_client::view::{FrameView, ViewInputs, ViewStats};
 use cs_client::view_effects::{calc_view_idle, calc_viewmodel_angles};
 
 const MAX_FEED: usize = 5;
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/icon-64.png");
+
+fn decode_app_icon_rgba() -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory_with_format(APP_ICON_PNG, image::ImageFormat::Png).ok()?;
+    let rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    Some((w, h, rgba.into_raw()))
+}
+
+fn load_window_icon() -> Option<winit::window::Icon> {
+    let (w, h, rgba) = decode_app_icon_rgba()?;
+    winit::window::Icon::from_rgba(rgba, w, h).ok()
+}
 
 pub struct LaunchConfig {
     pub gamedir: Option<PathBuf>,
@@ -115,6 +128,7 @@ struct WindowRuntime {
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     bg_texture: Option<egui::TextureHandle>,
+    brand_logo: Option<egui::TextureHandle>,
     hud_sprites: Option<HudSprites>,
     vgui_bank: VguiAssetBank,
     cursor_captured: bool,
@@ -229,6 +243,8 @@ pub struct Cs16App {
     voice_player_scales: [f32; 32],
     lj_tracker: cs_pm::ljstats::JumpTracker,
     last_ljstats: Option<(f64, cs_pm::ljstats::JumpStats)>,
+    setup_gamedir_input: String,
+    setup_error: Option<String>,
 }
 
 struct PendingRcon {
@@ -253,7 +269,13 @@ impl Cs16App {
             enable_downloads: true,
         };
 
-        let (vfs, available_maps, palette, loc) =
+        let initial_setup_dir = launch
+            .gamedir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .or_else(|| std::env::var("CS16_GAMEDIR").ok())
+            .unwrap_or_default();
+        let (vfs, available_maps, palette, loc, setup_error) =
             match Vfs::discover(launch.gamedir.as_deref(), vfs_cfg) {
                 Ok(vfs) => {
                     let maps = vfs.list_maps();
@@ -269,12 +291,19 @@ impl Cs16App {
                     ));
                     let lang = cvars.get_str("cl_language").to_string();
                     let loc = LocalizationTable::load_language(&vfs, &lang);
-                    (Some(vfs), maps, VguiPalette::from(colors), Some(loc))
+                    (Some(vfs), maps, VguiPalette::from(colors), Some(loc), None)
                 }
                 Err(err) => {
-                    cvars.error(format!("{err}"));
-                    warn!("{err}");
-                    (None, Vec::new(), VguiPalette::from(VguiColors::default()), None)
+                    let msg = format!("{err}");
+                    cvars.error(&msg);
+                    warn!("{msg}");
+                    (
+                        None,
+                        Vec::new(),
+                        VguiPalette::from(VguiColors::default()),
+                        None,
+                        Some(msg),
+                    )
                 }
             };
 
@@ -382,7 +411,62 @@ impl Cs16App {
             voice_player_scales: [1.0; 32],
             lj_tracker: cs_pm::ljstats::JumpTracker::default(),
             last_ljstats: None,
+            setup_gamedir_input: initial_setup_dir,
+            setup_error,
         }
+    }
+
+    fn mount_gamedir(&mut self, dir: &Path) -> Result<(), String> {
+        let vfs_cfg = VfsConfig {
+            enable_hd_models: self.cvars.get_bool("cl_hd_models"),
+            enable_downloads: true,
+        };
+        let vfs = Vfs::discover(Some(dir), vfs_cfg).map_err(|e| format!("{e}"))?;
+        let maps = vfs.list_maps();
+        let colors = VguiColors::load(&vfs);
+        let palette = VguiPalette::from(colors);
+        let lang = self.cvars.get_str("cl_language").to_string();
+        let loc = LocalizationTable::load_language(&vfs, &lang);
+
+        self.menu_ui.load_resources(&vfs, &lang);
+        self.options_ui.load_resources(&vfs);
+        self.vgui_rt.invalidate_cache();
+        self.vgui_rt.load_scheme_fonts(&vfs);
+        self.spectator_ui.load_assets(&vfs);
+        self.command_menu_ui.load_from_vfs(&vfs);
+        self.titles = TitlesTable::load(&vfs);
+        self.audio.load_sentences(&vfs);
+
+        if let Some(rt) = &mut self.runtime {
+            apply_vgui2_theme(&rt.egui_ctx, palette);
+            install_scheme_fonts_into_egui(&rt.egui_ctx, &vfs, &self.vgui_rt.scheme_fonts);
+            rt.bg_texture = load_menu_background(&vfs).ok().map(|img| {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.rgba,
+                );
+                rt.egui_ctx.load_texture(
+                    "cs16_menu_background",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            rt.hud_sprites = Some(HudSprites::load(&rt.egui_ctx, &vfs));
+            rt.vgui_bank = VguiAssetBank::load(&rt.egui_ctx, Some(&vfs));
+        }
+
+        self.cvars.info(format!(
+            "Mounted GoldSrc assets from: {} ({} files, {} maps)",
+            vfs.root().display(),
+            vfs.file_count(),
+            maps.len()
+        ));
+        self.vfs = Some(vfs);
+        self.available_maps = maps;
+        self.palette = palette;
+        self.loc = Some(loc);
+        self.setup_error = None;
+        Ok(())
     }
 
     fn is_in_game(&self) -> bool {
@@ -3043,6 +3127,127 @@ impl Cs16App {
         self.disconnect_err_ui
             .show(&rt.egui_ctx, &mut self.vgui_rt, &dlg_ctx);
         let mod_decisions = draw_mod_approval_prompt(&rt.egui_ctx, &pending_mod_approvals);
+        let mut mount_path_requested: Option<PathBuf> = None;
+        let mut open_console_from_setup = false;
+        let mut quit_from_setup = false;
+        if self.vfs.is_none() && !self.session.is_active() {
+            let pal = self.palette;
+            let logo_tex = rt.brand_logo.as_ref();
+            let resp = egui::Window::new("cs16-rs — Mount Half-Life Assets")
+                .id(egui::Id::unique("cs16_pre_vfs_setup"))
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .frame(
+                    egui::Frame::NONE
+                        .fill(pal.control_bg)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .inner_margin(egui::Margin::same(12))
+                        .stroke(egui::Stroke::new(1.0, pal.border_bright)),
+                )
+                .show(&rt.egui_ctx, |ui| {
+                    ui.set_min_width(440.0);
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = logo_tex {
+                            ui.image(egui::load::SizedTexture::new(
+                                tex.id(),
+                                egui::vec2(48.0, 48.0),
+                            ));
+                        }
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("cs16-rs — Half-Life / CS 1.6 Asset Setup")
+                                    .color(pal.bright_control_text)
+                                    .strong()
+                                    .size(15.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Assets are mounted read-only from your local Steam Half-Life install.",
+                                )
+                                .color(pal.base_text)
+                                .size(12.0),
+                            );
+                        });
+                    });
+                    ui.add_space(8.0);
+                    egui::Frame::NONE
+                        .fill(pal.window_bg)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .inner_margin(egui::Margin::same(8))
+                        .stroke(egui::Stroke::new(1.0, pal.border_dark))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Enter path to your Half-Life folder (containing cstrike/ and valve/):",
+                                )
+                                .color(pal.bright_text)
+                                .size(12.0),
+                            );
+                            ui.add_space(4.0);
+                            let edit = egui::TextEdit::singleline(&mut self.setup_gamedir_input)
+                                .desired_width(410.0)
+                                .hint_text(r"C:\Program Files (x86)\Steam\steamapps\common\Half-Life");
+                            let edit_resp = ui.add(edit);
+                            if edit_resp.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && !self.setup_gamedir_input.trim().is_empty()
+                            {
+                                mount_path_requested =
+                                    Some(PathBuf::from(self.setup_gamedir_input.trim()));
+                            }
+                            if let Some(ref err) = self.setup_error {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(err)
+                                        .color(egui::Color32::from_rgb(255, 160, 0))
+                                        .size(11.5),
+                                );
+                            }
+                        });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let mount_btn = egui::Button::new(
+                            egui::RichText::new("Mount Folder").color(pal.bright_control_text),
+                        )
+                        .fill(pal.control_bg)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .stroke(egui::Stroke::new(1.0, pal.border_bright));
+                        if ui.add(mount_btn).clicked()
+                            && !self.setup_gamedir_input.trim().is_empty()
+                        {
+                            mount_path_requested =
+                                Some(PathBuf::from(self.setup_gamedir_input.trim()));
+                        }
+                        let con_btn = egui::Button::new(
+                            egui::RichText::new("Console").color(pal.base_text),
+                        )
+                        .fill(pal.control_bg)
+                        .corner_radius(egui::CornerRadius::ZERO)
+                        .stroke(egui::Stroke::new(1.0, pal.border_bright));
+                        if ui.add(con_btn).clicked() {
+                            open_console_from_setup = true;
+                        }
+                        let quit_btn =
+                            egui::Button::new(egui::RichText::new("Quit").color(pal.base_text))
+                                .fill(pal.control_bg)
+                                .corner_radius(egui::CornerRadius::ZERO)
+                                .stroke(egui::Stroke::new(1.0, pal.border_bright));
+                        if ui.add(quit_btn).clicked() {
+                            quit_from_setup = true;
+                        }
+                    });
+                });
+            if let Some(inner) = resp {
+                paint_vgui_bevel(
+                    &rt.egui_ctx.layer_painter(inner.response.layer_id),
+                    inner.response.rect,
+                    true,
+                    pal,
+                );
+            }
+        }
         pending_actions.extend(self.console_ui.show(
             &rt.egui_ctx,
             &mut self.vgui_rt,
@@ -3292,6 +3497,18 @@ impl Cs16App {
         }
 
         // 5. Post-frame actions.
+        if let Some(dir) = mount_path_requested
+            && let Err(err) = self.mount_gamedir(&dir)
+        {
+            self.setup_error = Some(err.clone());
+            self.cvars.error(err);
+        }
+        if open_console_from_setup {
+            self.console_ui.open();
+        }
+        if quit_from_setup {
+            pending_actions.push(EngineAction::Quit);
+        }
         self.apply_demo_ui_actions(demo_actions);
         for (mod_id, allow) in mod_decisions {
             if allow {
@@ -3388,7 +3605,15 @@ impl Cs16App {
         false
     }
 
-    fn init_egui_context(&self) -> (egui::Context, Option<egui::TextureHandle>, Option<HudSprites>, VguiAssetBank) {
+    fn init_egui_context(
+        &self,
+    ) -> (
+        egui::Context,
+        Option<egui::TextureHandle>,
+        Option<egui::TextureHandle>,
+        Option<HudSprites>,
+        VguiAssetBank,
+    ) {
         let egui_ctx = egui::Context::default();
         apply_vgui2_theme(&egui_ctx, self.palette);
         if let Some(vfs) = &self.vfs {
@@ -3407,12 +3632,21 @@ impl Cs16App {
                 )
             })
         });
+        let brand_logo = decode_app_icon_rgba().map(|(w, h, rgba)| {
+            let color_image =
+                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            egui_ctx.load_texture(
+                "cs16_brand_logo",
+                color_image,
+                egui::TextureOptions::LINEAR,
+            )
+        });
         let hud_sprites = self
             .vfs
             .as_ref()
             .map(|vfs| HudSprites::load(&egui_ctx, vfs));
         let vgui_bank = VguiAssetBank::load(&egui_ctx, self.vfs.as_ref());
-        (egui_ctx, bg_texture, hud_sprites, vgui_bank)
+        (egui_ctx, bg_texture, brand_logo, hud_sprites, vgui_bank)
     }
 
     fn apply_startup_commands(&mut self, event_loop: Option<&ActiveEventLoop>) -> bool {
@@ -3458,7 +3692,7 @@ impl Cs16App {
     /// Run headless offscreen without creating any visible OS window (for `cargo xtask visual-diff`).
     pub fn run_headless(mut self) -> Result<(), String> {
         let renderer = Renderer::new_headless(self.launch.width, self.launch.height)?;
-        let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
+        let (egui_ctx, bg_texture, brand_logo, hud_sprites, vgui_bank) = self.init_egui_context();
         info!(gpu = %renderer.adapter_name, "Counter-Strike 1.6 (Rust) headless runtime ready");
         self.runtime = Some(WindowRuntime {
             window: None,
@@ -3466,6 +3700,7 @@ impl Cs16App {
             egui_ctx,
             egui_state: None,
             bg_texture,
+            brand_logo,
             hud_sprites,
             vgui_bank,
             cursor_captured: false,
@@ -3502,12 +3737,15 @@ impl ApplicationHandler for Cs16App {
             return;
         }
 
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title("Counter-Strike 1.6 (Rust)")
             .with_inner_size(LogicalSize::new(
                 f64::from(self.launch.width),
                 f64::from(self.launch.height),
             ));
+        if let Some(icon) = load_window_icon() {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let mut renderer = Renderer::new(Arc::clone(&window));
@@ -3515,7 +3753,7 @@ impl ApplicationHandler for Cs16App {
             self.cvars.get_bool("gl_vsync"),
             self.cvars.get_bool("gl_lowlatency"),
         );
-        let (egui_ctx, bg_texture, hud_sprites, vgui_bank) = self.init_egui_context();
+        let (egui_ctx, bg_texture, brand_logo, hud_sprites, vgui_bank) = self.init_egui_context();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -3533,6 +3771,7 @@ impl ApplicationHandler for Cs16App {
             egui_ctx,
             egui_state: Some(egui_state),
             bg_texture,
+            brand_logo,
             hud_sprites,
             vgui_bank,
             cursor_captured: false,
@@ -4114,5 +4353,12 @@ mod tests {
         // Idle frame decays the second half of `m_filter`.
         app.sample_accumulated_mouse_delta();
         assert!((app.camera.yaw_deg - (100.0 - 10.0 * 2.0 * 0.022)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn embedded_window_icon_decodes_to_64x64_rgba() {
+        let (w, h, rgba) = decode_app_icon_rgba().expect("decode icon-64.png");
+        assert_eq!((w, h), (64, 64));
+        assert_eq!(rgba.len(), 64 * 64 * 4);
     }
 }

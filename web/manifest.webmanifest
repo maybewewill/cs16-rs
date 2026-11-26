@@ -3,7 +3,21 @@
   "short_name": "cs16-rs",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#2f342c",
+  "background_color": "#1d211a",
   "theme_color": "#4c5844",
-  "description": "Counter-Strike 1.6 Protocol 48 & offline bots running in WebAssembly + WebGPU/WebGL2"
+  "description": "Counter-Strike 1.6 Protocol 48 & offline bots running in WebAssembly + WebGPU/WebGL2",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }

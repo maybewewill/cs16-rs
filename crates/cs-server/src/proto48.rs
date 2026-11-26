@@ -433,6 +433,11 @@ const EMBEDDED_SW_JS: &[u8] = include_bytes!("../../../web/sw.js");
 const EMBEDDED_MANIFEST: &[u8] = include_bytes!("../../../web/manifest.webmanifest");
 const EMBEDDED_ADMIN_HTML: &[u8] = include_bytes!("../../../web/admin.html");
 const EMBEDDED_ADMIN_JS: &[u8] = include_bytes!("../../../web/admin.js");
+const EMBEDDED_FAVICON_ICO: &[u8] = include_bytes!("../../../web/favicon.ico");
+const EMBEDDED_ICON_512: &[u8] = include_bytes!("../../../web/icons/icon-512.png");
+const EMBEDDED_ICON_192: &[u8] = include_bytes!("../../../web/icons/icon-192.png");
+const EMBEDDED_APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../../web/icons/apple-touch-icon.png");
+const EMBEDDED_FAVICON_32: &[u8] = include_bytes!("../../../web/icons/favicon-32.png");
 
 fn embedded_web_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     match path {
@@ -446,6 +451,11 @@ fn embedded_web_asset(path: &str) -> Option<(&'static str, &'static [u8])> {
         "/manifest.webmanifest" => Some(("application/manifest+json; charset=utf-8", EMBEDDED_MANIFEST)),
         "/admin" | "/admin.html" => Some(("text/html; charset=utf-8", EMBEDDED_ADMIN_HTML)),
         "/admin.js" => Some(("text/javascript; charset=utf-8", EMBEDDED_ADMIN_JS)),
+        "/favicon.ico" => Some(("image/x-icon", EMBEDDED_FAVICON_ICO)),
+        "/icons/icon-512.png" => Some(("image/png", EMBEDDED_ICON_512)),
+        "/icons/icon-192.png" => Some(("image/png", EMBEDDED_ICON_192)),
+        "/icons/apple-touch-icon.png" => Some(("image/png", EMBEDDED_APPLE_TOUCH_ICON)),
+        "/icons/favicon-32.png" => Some(("image/png", EMBEDDED_FAVICON_32)),
         _ => None,
     }
 }
@@ -2280,6 +2290,24 @@ mod tests {
 
         assert!(parse(&args(&["--replay-rounds", "abc"])).is_err());
         assert!(parse(&args(&["--replay-rounds"])).is_err());
+    }
+
+    #[test]
+    fn embedded_web_assets_include_branding_icons_with_accurate_mime_types() {
+        let (ico_mime, ico_bytes) = embedded_web_asset("/favicon.ico").expect("favicon.ico");
+        assert_eq!(ico_mime, "image/x-icon");
+        assert!(ico_bytes.len() > 22 && &ico_bytes[..4] == b"\x00\x00\x01\x00");
+
+        for path in [
+            "/icons/icon-512.png",
+            "/icons/icon-192.png",
+            "/icons/apple-touch-icon.png",
+            "/icons/favicon-32.png",
+        ] {
+            let (mime, bytes) = embedded_web_asset(path).unwrap_or_else(|| panic!("missing {path}"));
+            assert_eq!(mime, "image/png", "{path}");
+            assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} must be valid PNG");
+        }
     }
 
     fn tcp_http_request(addr: SocketAddr, raw: &str) -> Vec<u8> {
