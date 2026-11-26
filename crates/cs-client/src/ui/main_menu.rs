@@ -48,7 +48,7 @@ pub struct MainMenuUi {
     pub game_menu: Vec<GameMenuEntry>,
     pub settings_script: Option<SettingsScript>,
     pub loc: Option<LocalizationTable>,
-    /// `resource/game_menu.tga` (the COUNTER-STRIKE logo under the menu), loaded on first draw.
+    /// Transparent `cs16-rs` brand emblem rendered below the main menu, loaded on first draw.
     logo: Option<egui::TextureHandle>,
     logo_tried: bool,
     /// The armed (highlighted) menu row: the first row until the mouse arms another one.
@@ -187,32 +187,83 @@ impl MainMenuUi {
         let last_baseline = screen.max.y - 63.0 * s_menu;
         let menu_top = last_baseline - (rows - 1.0) * item_pitch - item_pitch * 0.75;
 
-        // The logo (`game_menu.tga`) below the menu, drawn at its own size * s.
+        // Transparent `cs16-rs` emblem + classic gold `CS16-RS` wordmark anchored below the menu.
         if !self.logo_tried {
             self.logo_tried = true;
-            self.logo = m.vfs.and_then(|v| cs_assets::scheme::load_tga_image(v, "resource/game_menu.tga").ok()).map(|img| {
-                ctx.load_texture(
-                    "cs16_menu_logo",
-                    egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba),
-                    egui::TextureOptions::LINEAR,
-                )
-            });
+            self.logo =
+                crate::ui::vgui_assets::load_brand_logo_texture(ctx, "cs16_menu_brand_logo");
         }
         if !in_game && let Some(logo) = &self.logo {
-            let size = logo.size_vec2() * s_menu;
-            // `game_menu.tga` (207x32, content from (1, 1) to (206, 25)): the content's left
-            // edge is 4 px left of the menu text and its last row 16 px above the bottom (* s).
-            let min = Pos2::new(menu_x - 5.0 * s_menu, screen.max.y - (16.0 + 24.0) * s_menu);
+            let icon_sz = (28.0 * s_menu).round();
+            let min = Pos2::new(
+                menu_x - 5.0 * s_menu,
+                screen.max.y - (14.0 + 28.0) * s_menu,
+            );
+            let icon_rect = Rect::from_min_size(min, Vec2::splat(icon_sz));
+            let uv_full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            let menu_gold = Color32::from_rgb(236, 227, 20);
+            let shadow_col = Color32::from_black_alpha(165);
+
+            const MENU_LOGO_FONT_FACTOR: f32 = 0.775;
+            let mut tracker_fonts = runtime.tracker_scheme.fonts.clone();
+            if let Some(variants) = tracker_fonts.fonts.get_mut("menularge") {
+                for v in variants.iter_mut() {
+                    v.tall = (v.tall * MENU_LOGO_FONT_FACTOR * s_menu).round();
+                }
+            }
+            let word_pos = Pos2::new(
+                icon_rect.right() + (8.0 * s_menu).round(),
+                icon_rect.top() + (1.0 * s_menu).round(),
+            );
+            let word_rect = Rect::from_min_size(
+                word_pos,
+                Vec2::new((220.0 * s_menu).round(), icon_sz),
+            );
+            let shadow_off = Vec2::splat(s_menu.round().max(1.0));
+
             egui::Area::new(egui::Id::unique("cs16_menu_logo"))
                 .order(egui::Order::Middle)
                 .fixed_pos(min)
                 .interactable(false)
                 .show(ctx, |ui| {
-                    ui.painter().image(
+                    let painter = ui.painter();
+                    painter.image(
                         logo.id(),
-                        Rect::from_min_size(min, size),
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
+                        icon_rect.translate(shadow_off),
+                        uv_full,
+                        shadow_col,
+                    );
+                    painter.image(logo.id(), icon_rect, uv_full, menu_gold);
+                    let opts = VguiTextDrawOpts {
+                        align: TextAlignment::West,
+                        process_hotkey: false,
+                        proportional_scale: false,
+                    };
+                    runtime.font_atlas.paint_text(
+                        painter,
+                        ctx,
+                        m.vfs,
+                        &tracker_fonts,
+                        "tracker",
+                        "MenuLarge",
+                        480,
+                        word_rect.translate(shadow_off),
+                        "CS16-RS",
+                        shadow_col,
+                        opts,
+                    );
+                    runtime.font_atlas.paint_text(
+                        painter,
+                        ctx,
+                        m.vfs,
+                        &tracker_fonts,
+                        "tracker",
+                        "MenuLarge",
+                        480,
+                        word_rect,
+                        "CS16-RS",
+                        menu_gold,
+                        opts,
                     );
                 });
         }

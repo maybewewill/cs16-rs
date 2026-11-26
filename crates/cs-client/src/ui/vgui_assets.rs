@@ -1,6 +1,6 @@
 //! The VGUI2 colours (`ClientScheme.res`), `icon_steam.tga` and the Steam 2003 window chrome.
 
-use cs_assets::scheme::{ClientVguiColors, load_tga_image};
+use cs_assets::scheme::ClientVguiColors;
 use cs_assets::vgui_res::TextAlignment;
 use cs_vfs::Vfs;
 use egui::{
@@ -34,7 +34,25 @@ impl From<ClientVguiColors> for ClientPalette {
     }
 }
 
-/// The VGUI2 colours and the icon the menus draw with.
+/// Transparent 128x128 `cs16-rs` brand emblem (tintable for CS 1.6 VGUI2 titlebars and panels).
+pub const BRAND_LOGO_UI_PNG: &[u8] = include_bytes!("../../assets/logo-ui.png");
+
+/// Decode [`BRAND_LOGO_UI_PNG`] into `(width, height, rgba8)` for UI texture uploads or tests.
+pub fn decode_brand_logo_ui_rgba() -> Option<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory_with_format(BRAND_LOGO_UI_PNG, image::ImageFormat::Png).ok()?;
+    let rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    Some((w, h, rgba.into_raw()))
+}
+
+/// Upload the transparent `cs16-rs` brand emblem into an `egui` texture handle.
+pub fn load_brand_logo_texture(ctx: &egui::Context, name: &str) -> Option<TextureHandle> {
+    let (w, h, rgba) = decode_brand_logo_ui_rgba()?;
+    let color_img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+    Some(ctx.load_texture(name, color_img, egui::TextureOptions::LINEAR))
+}
+
+/// The VGUI2 colours and the emblem icon the menus and dialogs draw with.
 pub struct VguiAssetBank {
     pub client_palette: ClientPalette,
     pub steam_icon: Option<TextureHandle>,
@@ -42,33 +60,17 @@ pub struct VguiAssetBank {
 
 impl VguiAssetBank {
     pub fn load(ctx: &egui::Context, vfs: Option<&Vfs>) -> Self {
-        let (client_palette, steam_icon) = if let Some(vfs) = vfs {
-            (
-                ClientPalette::from(ClientVguiColors::load(vfs)),
-                load_tga_texture(ctx, vfs, "resource/icon_steam.tga", "vgui_steam_icon"),
-            )
+        let client_palette = if let Some(vfs) = vfs {
+            ClientPalette::from(ClientVguiColors::load(vfs))
         } else {
-            (ClientPalette::from(ClientVguiColors::default()), None)
+            ClientPalette::from(ClientVguiColors::default())
         };
+        let steam_icon = load_brand_logo_texture(ctx, "vgui_cs16rs_icon");
         Self {
             client_palette,
             steam_icon,
         }
     }
-}
-
-fn load_tga_texture(
-    ctx: &egui::Context,
-    vfs: &Vfs,
-    path: &str,
-    name: &str,
-) -> Option<TextureHandle> {
-    let img = load_tga_image(vfs, path).ok()?;
-    let color_img = egui::ColorImage::from_rgba_unmultiplied(
-        [img.width as usize, img.height as usize],
-        &img.rgba,
-    );
-    Some(ctx.load_texture(name, color_img, egui::TextureOptions::LINEAR))
 }
 
 /// Authentic Steam 2003 VGUI2 window (`TrackerScheme.res`):
@@ -271,5 +273,22 @@ pub fn show_tracker_window(
 
     if close_clicked {
         *open = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_brand_logo_ui_rgba;
+
+    #[test]
+    fn brand_logo_ui_png_decodes_with_transparent_background() {
+        let (w, h, rgba) = decode_brand_logo_ui_rgba().expect("decode logo-ui.png");
+        assert_eq!((w, h), (128, 128));
+        assert_eq!(rgba.len(), 128 * 128 * 4);
+        assert_eq!(rgba[3], 0, "top-left corner must be transparent");
+        assert!(
+            rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 255),
+            "emblem body must contain opaque foreground pixels"
+        );
     }
 }

@@ -3632,15 +3632,8 @@ impl Cs16App {
                 )
             })
         });
-        let brand_logo = decode_app_icon_rgba().map(|(w, h, rgba)| {
-            let color_image =
-                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-            egui_ctx.load_texture(
-                "cs16_brand_logo",
-                color_image,
-                egui::TextureOptions::LINEAR,
-            )
-        });
+        let brand_logo =
+            cs_client::ui::vgui_assets::load_brand_logo_texture(&egui_ctx, "cs16_brand_logo");
         let hud_sprites = self
             .vfs
             .as_ref()
@@ -4360,5 +4353,10 @@ mod tests {
         let (w, h, rgba) = decode_app_icon_rgba().expect("decode icon-64.png");
         assert_eq!((w, h), (64, 64));
         assert_eq!(rgba.len(), 64 * 64 * 4);
+        assert_eq!(rgba[3], 0, "top-left corner must be transparent");
+        assert!(
+            rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 255),
+            "window icon must contain opaque foreground pixels"
+        );
     }
 }

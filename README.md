@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src=".github/assets/logo.png" alt="cs16-rs" width="128">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.png">
+  <img src=".github/assets/logo.png" alt="cs16-rs" width="128">
+</picture>
 
 # cs16-rs
 
@@ -13,9 +16,27 @@
 [![Rust 1.100](https://img.shields.io/badge/Rust-1.100%20%7C%20Edition%202024-dea584?logo=rust)](rust-toolchain.toml)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-2e7d32.svg)](Cargo.toml)
 
-[Play in Browser](https://maybewewill.github.io/cs16-rs/) · [Releases](https://github.com/maybewewill/cs16-rs/releases) · [Quick Start](#quick-start) · [Modding (5 Languages)](docs/MODDING.md) · [Benchmarks](#performance--rewrite-advantages) · [Deployment](docs/DEPLOYMENT.md)
+[Play in Browser](https://maybewewill.github.io/cs16-rs/) · [Screenshots](#screenshots--footage) · [Releases](https://github.com/maybewewill/cs16-rs/releases) · [Quick Start](#quick-start) · [Modding (5 Languages)](docs/MODDING.md) · [Benchmarks](#performance--rewrite-advantages) · [Deployment](docs/DEPLOYMENT.md)
 
 </div>
+
+---
+
+## Screenshots & Footage
+
+<div align="center">
+  <img src=".github/assets/shot-dust2-hud.jpg" alt="cs16-rs live Vulkan rendering on de_dust2 with classic GoldSrc HUD and net_graph 1" width="100%">
+  <br>
+  <sub><i>Unretouched 1280×720 real-time <code>wgpu</code> Vulkan capture on <code>de_dust2</code> using retail Steam assets, authentic HUD sprites, and GoldSrc <code>net_graph 1</code>.</i></sub>
+</div>
+
+<br>
+
+| | |
+|---|---|
+| <img src=".github/assets/shot-main-menu.jpg" alt="Main Menu" width="100%"><br><sub><b>Main Menu</b> — <code>GameMenu.res</code> + transparent <code>cs16-rs</code> emblem</sub> | <img src=".github/assets/shot-buy-menu.jpg" alt="VGUI2 Buy Menu" width="100%"><br><sub><b>VGUI2 Buy Menu</b> — <code>Buy*.res</code> with amber <code>cs16-rs</code> crest</sub> |
+| <img src=".github/assets/shot-inferno-hud.jpg" alt="de_inferno gameplay" width="100%"><br><sub><b>de_inferno</b> — BSP lightmaps, skybox &amp; weapon viewmodel</sub> | <img src=".github/assets/shot-nuke-hud.jpg" alt="de_nuke gameplay" width="100%"><br><sub><b>de_nuke</b> — Classic GoldSrc geometry &amp; HUD rendering</sub> |
+| <img src=".github/assets/shot-scoreboard.jpg" alt="Scoreboard" width="100%"><br><sub><b>TAB Scoreboard &amp; ZBots</b> — <code>ScoreBoard.res</code> live match state</sub> | <img src=".github/assets/shot-console.jpg" alt="Developer Console" width="100%"><br><sub><b>Developer Console</b> — Steam 2003 <code>TrackerScheme.res</code> chrome</sub> |
 
 ---
 

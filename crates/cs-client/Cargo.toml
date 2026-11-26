@@ -23,13 +23,13 @@ cs-vfs.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 glam.workspace = true
+image.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18"
 egui-winit.workspace = true
-image.workspace = true
 opus = "0.4"
 pollster.workspace = true
 rodio.workspace = true

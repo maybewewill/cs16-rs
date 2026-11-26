@@ -242,6 +242,7 @@ pub struct VguiRuntime {
     pub font_atlas: VguiFontAtlas,
     pub states: HashMap<String, VguiControlState>,
     textures: HashMap<String, TextureHandle>,
+    brand_panel_logo: Option<Option<TextureHandle>>,
     events: Vec<VguiEvent>,
     ui_sounds: Vec<VguiUiSound>,
     hovered_control: Option<String>,
@@ -280,6 +281,7 @@ impl VguiRuntime {
             font_atlas: VguiFontAtlas::new(),
             states: HashMap::new(),
             textures: HashMap::new(),
+            brand_panel_logo: None,
             events: Vec::new(),
             ui_sounds: Vec::new(),
             hovered_control: None,
@@ -757,7 +759,20 @@ impl VguiRuntime {
             .map(|c| c.image.clone())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "gfx/vgui/CS_logo".to_string());
-        if let Some(tex) = self.ensure_texture(ctx, vfs, &img_path) {
+        let is_cs_brand_logo = matches!(
+            img_path.to_ascii_lowercase().as_str(),
+            "gfx/vgui/cs_logo" | "gfx/vgui/cs_logo.tga"
+        );
+        let panel_logo = if is_cs_brand_logo {
+            self.brand_panel_logo
+                .get_or_insert_with(|| {
+                    crate::ui::vgui_assets::load_brand_logo_texture(ctx, "vgui_cs16rs_panel_logo")
+                })
+                .clone()
+        } else {
+            self.ensure_texture(ctx, vfs, &img_path)
+        };
+        if let Some(tex) = panel_logo {
             draw_vgui_image_panel(painter, icon_rect, Some(&tex), icon_col);
         }
 

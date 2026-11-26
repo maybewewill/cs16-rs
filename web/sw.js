@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cs16-rs-shell-v2';
+const CACHE_NAME = 'cs16-rs-shell-v3';
 const SHELL_ASSETS = [
   './',
   './index.html',
